@@ -1,0 +1,57 @@
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ─── Environments ─────────────────────────────────────────────────────────────
+.env
+.venv/
+venv/
+env/
+ENV/
+
+# ─── Jupyter ──────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ─── Model Weights (too large for Git — use Git LFS or HuggingFace Hub) ───────
+new_merged_model_fp32/
+new_adapter/
+results/
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# ─── FAISS Index & Datasets (large binary files) ──────────────────────────────
+*.faiss
+rag_documents/
+arrow/
+
+# ─── HuggingFace Cache ────────────────────────────────────────────────────────
+.cache/
+~/.cache/huggingface/
+
+# ─── Experiment Outputs ───────────────────────────────────────────────────────
+evaluation_results.png
+runs/
+logs/
+wandb/
+mlruns/
+
+# ─── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── IDE ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
