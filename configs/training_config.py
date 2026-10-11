@@ -4,7 +4,7 @@ Centralised hyperparameters for QLoRA fine-tuning.
 Modify here rather than in training code.
 """
 from dataclasses import dataclass, field
-from typing import List
+
 
 
 @dataclass
@@ -30,7 +30,7 @@ class FinetuneConfig:
     lora_alpha: int = 64
     lora_dropout: float = 0.05
     lora_bias: str = "none"
-    lora_target_modules: List[str] = field(default_factory=lambda: [
+    lora_target_modules: list[str] = field(default_factory=lambda: [
         "q_proj", "k_proj", "v_proj", "o_proj",
         "gate_proj", "up_proj", "down_proj"
     ])
@@ -46,7 +46,7 @@ class FinetuneConfig:
     optim: str = "paged_adamw_32bit"
     max_grad_norm: float = 1.0
     fp16: bool = True
-    bf16: bool = False                             # disabled for Turing GPUs (T4, 1660)
+    bf16: bool = False                             # set True on Ampere+ GPUs
     gradient_checkpointing: bool = True
     group_by_length: bool = True
 
@@ -57,28 +57,36 @@ class FinetuneConfig:
     output_dir: str = "./results"
 
     # ── Memory ───────────────────────────────────────────────────────────────
-    max_memory_gb: int = 6                         # target VRAM budget
+    max_memory_gb: int = 14                        # per-GPU cap passed to from_pretrained
 
 
 @dataclass
 class RAGConfig:
-    # ── Knowledge Base ────────────────────────────────────────────────────────
+    # ── Knowledge Base (demo corpus) ──────────────────────────────────────────
     dataset_name: str = "gfissore/arxiv-abstracts-2021"
     num_documents: int = 5000
-    index_path: str = "arxiv_abstracts.faiss"
-    docs_path: str = "rag_documents"
+    index_dir: str = "indexes/arxiv"
 
     # ── Embedding ─────────────────────────────────────────────────────────────
     embedding_model: str = "all-MiniLM-L6-v2"
-    embedding_dim: int = 384
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
-    top_k: int = 8
+    top_k: int = 5                                 # passages given to the reader (all modes)
     num_hops: int = 2
-    max_context_chars: int = 2200
+    max_passage_chars: int = 700
+
+    # ── LLM Backend (see src/llm.py) ──────────────────────────────────────────
+    # hf:<path-or-hub-id>  |  openai:<model>@<base_url>  (vLLM, Ollama, hosted APIs)
+    llm: str = "hf:deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 
     # ── Generation ────────────────────────────────────────────────────────────
-    max_new_tokens: int = 200
+    prompt_style: str = "chat"                     # chat | alpaca
+    reasoning: bool = False                        # let R1 emit <think> before answering
+    reasoning_token_budget: int = 512              # extra tokens when reasoning=True
+    load_in_4bit: bool = False                     # hf backend only
+    max_new_tokens: int = 48                       # short answers (benchmarks)
+    max_new_tokens_long: int = 256                 # free-form answers (demo)
+    do_sample: bool = False                        # greedy decoding for reproducible evals
     temperature: float = 0.3
     top_p: float = 0.9
     top_k_sampling: int = 40

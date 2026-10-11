@@ -1,250 +1,177 @@
-# 🔬 QLoRA Fine-Tuning + Multi-Hop RAG Pipeline
+# Multi-Hop RAG with QLoRA Fine-Tuning
 
+[![CI](https://github.com/a1if/qlora-multihop-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/a1if/qlora-multihop-rag/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch)](https://pytorch.org/)
-[![HuggingFace](https://img.shields.io/badge/🤗-Transformers-yellow)](https://huggingface.co/docs/transformers)
-[![PEFT](https://img.shields.io/badge/PEFT-LoRA-green)](https://github.com/huggingface/peft)
 [![License: MIT](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
 
-> An end-to-end NLP system that combines **QLoRA instruction fine-tuning** of a 1.5B-parameter LLM with a **multi-hop Retrieval-Augmented Generation (RAG)** pipeline, evaluated across BLEU, ROUGE, BERTScore, and semantic similarity metrics.
+A multi-hop retrieval-augmented generation service with **pluggable LLM backends**, a **FastAPI** serving layer with Prometheus metrics, a **reproducible HotpotQA benchmark harness**, and a **QLoRA** fine-tuning pipeline for the reader model.
+
+The same pipeline code runs against an in-process Hugging Face model, a vLLM or Ollama server, or a hosted OpenAI-compatible API. Retrieval, evaluation and serving don't change when the model does.
 
 ---
 
-## 📌 Overview
+## Highlights
 
-This project explores two complementary approaches to improving LLM response quality — **parameter-efficient fine-tuning** and **retrieval-augmented generation** — and rigorously compares them through a three-way evaluation framework.
-
-| Component | What it does |
+| Area | What's here |
 |---|---|
-| **QLoRA Fine-Tuning** | Instruction-tunes `DeepSeek-R1-Distill-Qwen-1.5B` on 2,000 Alpaca samples using 4-bit NF4 quantisation |
-| **Multi-Hop RAG** | Decomposes complex queries into sub-questions, retrieves over 5,000 arXiv abstracts via FAISS, and synthesises answers iteratively |
-| **Evaluation Framework** | Three-way comparison (Base vs Fine-Tuned vs RAG) using BLEU, ROUGE-1/2/L, BERTScore F1, cosine similarity, and lexical diversity |
-| **Gradio Demo** | Interactive chat interface with source attribution and inference timing |
+| **Retrieval strategies** | `closed` (no retrieval), `single`-hop, `iterative` (LLM writes a follow-up search query from what it found), `decompose` (LLM splits the question up front). Every mode gives the reader the **same passage budget k**, so comparisons are fair. |
+| **Backend abstraction** | `hf:<path>` or `openai:<model>@<base_url>`: one `LLM` protocol, swappable by config ([src/llm.py](src/llm.py)) |
+| **Serving** | FastAPI `/v1/answer` with request validation, request-ID propagation, structured JSON logs, `/healthz` + `/readyz`, Prometheus `/metrics` with per-stage latency histograms ([src/api.py](src/api.py)) |
+| **Evaluation** | HotpotQA distractor dev set with official EM/F1, supporting-paragraph recall@k, bootstrap 95% CIs, paired-bootstrap significance against a reference system, p50/p95 latency and LLM-call cost per question ([src/eval_hotpotqa.py](src/eval_hotpotqa.py)) |
+| **Reliability** | Resumable JSONL predictions, concurrent evaluation over HTTP backends, thread-safe per-request timing, retries/timeouts on the HTTP client |
+| **Fine-tuning** | QLoRA (4-bit NF4 + LoRA) on DeepSeek-R1-Distill-Qwen-1.5B, merged for serving ([src/finetune.py](src/finetune.py)) |
+| **Quality gates** | 57 unit/integration tests running in ~2 s with a fake embedder and scripted LLM (no model downloads), ruff, GitHub Actions on Python 3.10/3.12, Docker build check |
 
 ---
 
-## 🏗️ Architecture
-
-### 1. Fine-Tuning Pipeline
+## Architecture
 
 ```mermaid
 flowchart LR
-    A["🗃️ Alpaca-Cleaned\n2,000 samples"] --> B["Prompt\nFormatter"]
-    B --> C["Tokeniser\nmax_len=512"]
-    C --> D["4-bit NF4\nQuantisation\nBitsAndBytes"]
-    D --> E["LoRA Adapter\nr=128 · α=64\nAll projection layers"]
-    E --> F["SFTTrainer\nFP16 · 1 epoch"]
-    F --> G["merge_and_unload()"]
-    G --> H["💾 Merged Model\nnew_merged_model_fp32"]
+    C["Client"] -->|POST /v1/answer| API["FastAPI service<br/>validation · request IDs<br/>JSON logs · /metrics"]
+    API --> P["RAGPipeline<br/>closed | single | iterative | decompose"]
+    P -->|search| R["DenseRetriever<br/>FAISS inner-product<br/>MiniLM embeddings"]
+    P -->|generate| L{{"LLM protocol"}}
+    L --> HF["HFLLM<br/>in-process transformers<br/>(QLoRA merged model)"]
+    L --> OA["OpenAICompatibleLLM<br/>vLLM · Ollama · hosted API"]
+    E["Benchmark harness<br/>HotpotQA"] --> P
 ```
 
-### 2. Multi-Hop RAG Pipeline
+### Iterative multi-hop retrieval
 
 ```mermaid
 flowchart TD
-    Q["❓ Complex Query"] --> D["Sub-Question\nDecomposer\n(LLM-guided)"]
-    D --> H1["Hop 1\nFAISS Search\ntop-k=8"]
-    H1 --> T1["Reasoning\nTrace 1"]
-    T1 --> FU["Follow-up\nQuestion\n(LLM-guided)"]
-    FU --> H2["Hop 2\nFAISS Search\ntop-k=8"]
-    H2 --> T2["Reasoning\nTrace 2"]
-    T1 & T2 --> S["Answer\nSynthesis"]
-    S --> A["📝 Final Answer\n+ Source Citations"]
-
-    KB["📚 Knowledge Base\n5,000 arXiv Abstracts\nFAISS L2 Index\n384-dim embeddings"] --> H1 & H2
-```
-
-### 3. Evaluation Framework
-
-```mermaid
-flowchart LR
-    Q["Test Questions\nGeneral + RAG-specific"] --> BM["Base\nModel"]
-    Q --> FT["Fine-Tuned\nModel"]
-    Q --> RM["Multi-Hop\nRAG"]
-
-    BM & FT & RM --> E["Evaluation Suite"]
-
-    E --> M1["BLEU"]
-    E --> M2["ROUGE-1/2/L"]
-    E --> M3["BERTScore F1"]
-    E --> M4["Cosine\nSimilarity"]
-    E --> M5["Lexical\nDiversity"]
-
-    M1 & M2 & M3 & M4 & M5 --> R["📊 Results\nReport + Plots"]
+    Q["Question"] --> S1["Retrieve top-k for the question"]
+    S1 --> F["LLM: write ONE follow-up search query<br/>from the passages found so far"]
+    F --> S2["Retrieve top-k for the follow-up"]
+    S2 --> M["Round-robin merge + dedupe<br/>→ k passages"]
+    M --> RD["Reader LLM → short answer + citations"]
 ```
 
 ---
 
-## 📁 Project Structure
+## Quick start
 
-```
-qlora-multihop-rag/
-│
-├── notebooks/
-│   └── qlora_multihop_rag.ipynb      # Full end-to-end notebook (Colab-ready)
-│
-├── src/
-│   ├── finetune.py                   # QLoRA fine-tuning pipeline
-│   ├── rag_pipeline.py               # Multi-hop RAG controller
-│   ├── evaluate.py                   # Evaluation framework
-│   └── app.py                        # Gradio chat interface
-│
-├── configs/
-│   └── training_config.py            # Centralised hyperparameters
-│
-├── requirements.txt
-├── .gitignore
-└── README.md
-```
-
----
-
-## ⚙️ Installation
+### Run the stack with Docker (Ollama + API)
 
 ```bash
-# Clone the repository
-git clone https://github.com/<your-username>/qlora-multihop-rag.git
-cd qlora-multihop-rag
-
-# Install dependencies
-pip install -r requirements.txt
+docker compose up -d ollama
+docker compose exec ollama ollama pull deepseek-r1:1.5b
+docker compose run --rm indexer            # builds ./indexes/hotpotqa
+docker compose up -d api
 ```
 
-> **GPU Note:** Fine-tuning requires a CUDA GPU. The configuration targets **6 GB VRAM** (tested on NVIDIA GTX 1660 Super and Google Colab T4). Inference and RAG evaluation can run on CPU with reduced speed.
+```bash
+curl -s localhost:8080/v1/answer -H 'content-type: application/json' \
+  -d '{"question": "Which country was the discoverer of polonium born in?", "mode": "iterative"}'
+```
+
+Response (shape):
+
+```json
+{
+  "request_id": "6f1c0a9e2b7d4c13",
+  "answer": "...",
+  "mode": "iterative",
+  "queries": ["Which country was ...", "<LLM-written follow-up query>"],
+  "passages": [{"title": "...", "text": "...", "score": 0.71}],
+  "latency_ms": 0.0,
+  "timings": {"retrieval_s": 0.0, "llm_s": 0.0, "llm_calls": 2}
+}
+```
+
+To point at vLLM or a hosted endpoint, change `QMR_LLM` (and set `OPENAI_API_KEY` if the endpoint needs one).
+
+### Run locally
+
+```bash
+pip install -r requirements-serve.txt        # API + benchmark against an HTTP backend
+python -m src.build_index --hotpotqa --n 500
+QMR_LLM=openai:deepseek-r1:1.5b@http://localhost:11434/v1 QMR_INDEX_DIR=indexes/hotpotqa \
+  uvicorn src.api:app --port 8080
+```
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `QMR_LLM` | `hf:deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` | LLM backend spec |
+| `QMR_INDEX_DIR` | `indexes/arxiv` | Directory written by `src.build_index` |
+| `QMR_PROMPT_STYLE` | `chat` | `chat` (tokenizer template) or `alpaca` (fine-tune format), `hf:` only |
+| `QMR_REASONING` | `false` | Allow R1 `<think>` reasoning (stripped from answers) |
+| `QMR_TOP_K` / `QMR_HOPS` | `5` / `2` | Default passage budget and hops |
 
 ---
 
-## 🚀 Usage
+## Benchmark: HotpotQA
 
-### Step 1 — Fine-Tune the Base Model
+`src/eval_hotpotqa.py` samples N questions from the HotpotQA distractor dev set with a fixed seed. It pools all their paragraphs (2 gold + 8 distractors each) into one corpus, so the retriever has to find the right 2 among roughly 10×N. It then runs any set of `<model>:<mode>` systems:
+
+```bash
+python -m src.eval_hotpotqa --n 500 \
+  --model base=openai:base@http://localhost:8000/v1 \
+  --model ft=openai:ft@http://localhost:8001/v1 \
+  --systems base:closed base:single base:iterative base:decompose ft:single ft:iterative \
+  --reference base:single --workers 8
+```
+
+Outputs go to `results/hotpotqa/`: per-question predictions (`preds/…/*.jsonl`), the run config (`config.json`), and `summary.md` / `summary.csv` with:
+
+- **EM / F1** (official HotpotQA normalisation) with 95% bootstrap CIs, split by bridge vs comparison questions
+- **Support recall@k** and **all-support@k**: did retrieval surface the gold paragraphs?
+- **ΔF1 vs reference** with a paired-bootstrap CI (significant if it excludes 0)
+- **p50/p95 latency**, **LLM calls per question**, and the share of time spent in the LLM vs retrieval
+
+<!-- Paste results/hotpotqa/summary.md here after a full run. -->
+
+---
+
+## Fine-tuning the reader (QLoRA)
 
 ```python
 from src.finetune import run_finetuning
 from configs.training_config import FinetuneConfig
 
-config = FinetuneConfig()
-run_finetuning(config)
-# Saves merged model to: ./new_merged_model_fp32
+run_finetuning(FinetuneConfig())   # 4-bit NF4 base + LoRA (r=128, α=64) → merged model
 ```
 
-### Step 2 — Build the FAISS Knowledge Base
+The merged model can be loaded in-process (`hf:./new_merged_model_fp32`) or served with vLLM and benchmarked as `ft:*` systems against the base model. Training needs a CUDA GPU; serving and evaluation don't.
 
-```python
-from src.rag_pipeline import build_index
+---
 
-build_index(
-    dataset_name="gfissore/arxiv-abstracts-2021",
-    num_samples=5000,
-    index_path="arxiv_abstracts.faiss",
-    docs_path="rag_documents"
-)
+## Project structure
+
+```
+src/
+  llm.py            LLM protocol + HF / OpenAI-compatible backends
+  retriever.py      FAISS dense retriever, round-robin evidence merge
+  rag_pipeline.py   retrieval strategies, prompts, stage timing
+  text_utils.py     <think> stripping, answer / query / sub-question parsing
+  metrics.py        EM, F1, support recall, bootstrap CIs
+  hotpotqa.py       dataset loader + pooled corpus
+  eval_hotpotqa.py  ablation benchmark CLI
+  api.py            FastAPI service
+  app.py            Gradio demo
+  build_index.py    index build CLI (arXiv or HotpotQA)
+  finetune.py       QLoRA training
+tests/              fake embedder + scripted LLM; pipeline, API, harness, backend tests
+configs/            dataclass configs
+notebooks/          original coursework notebook (superseded by src/)
 ```
 
-### Step 3 — Run Multi-Hop RAG
-
-```python
-from src.rag_pipeline import RAGPipeline
-
-pipeline = RAGPipeline(
-    model_path="./new_merged_model_fp32",
-    index_path="arxiv_abstracts.faiss",
-    docs_path="rag_documents"
-)
-
-answer, contexts, subquestions, trace = pipeline.query(
-    "What is the significance of QLoRA in fine-tuning large language models?",
-    hops=2,
-    k=8
-)
-
-print(answer)
-```
-
-### Step 4 — Evaluate All Three Systems
-
-```python
-from src.evaluate import run_comparison
-
-results, metrics = run_comparison(pipeline)
-# Outputs: metrics table + bar chart + box plots
-```
-
-### Step 5 — Launch Gradio Demo
+## Development
 
 ```bash
-python src/app.py
-# Opens at http://localhost:7860
+pip install -r requirements-dev.txt
+ruff check src tests configs
+pytest
 ```
 
----
+## References
 
-## 📊 Evaluation Metrics
+- [QLoRA: Efficient Finetuning of Quantized LLMs](https://arxiv.org/abs/2305.14314), Dettmers et al., 2023
+- [HotpotQA: A Dataset for Diverse, Explainable Multi-hop Question Answering](https://arxiv.org/abs/1809.09600), Yang et al., 2018
+- [Interleaving Retrieval with Chain-of-Thought Reasoning (IRCoT)](https://arxiv.org/abs/2212.10509), Trivedi et al., 2023
+- [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks](https://arxiv.org/abs/2005.11401), Lewis et al., 2020
 
-The evaluation suite benchmarks three model configurations across four question types:
+## License
 
-| Metric | Description | Target |
-|---|---|---|
-| **BLEU** | N-gram precision vs fine-tuned reference | Higher → more faithful phrasing |
-| **ROUGE-1/2/L** | Recall-oriented overlap | Higher → better content coverage |
-| **BERTScore F1** | Contextual semantic similarity | Higher → deeper meaning preservation |
-| **Cosine Similarity** | Embedding-space groundedness in retrieved docs | Higher → better context utilisation |
-| **Lexical Diversity** | Type-token ratio of responses | Balanced → fluent, non-repetitive output |
-
----
-
-## 🧪 Key Design Decisions
-
-**Why QLoRA over full fine-tuning?**
-4-bit NF4 quantisation with LoRA adapters reduces GPU memory from ~12 GB to ~4.5 GB while preserving 95–98% of full fine-tune quality, making it accessible on consumer hardware.
-
-**Why LoRA rank r=128?**
-Higher rank captures more task-specific directions in weight space. With only 2,000 training samples, r=128 with α=64 provides sufficient capacity without overfitting.
-
-**Why multi-hop RAG over single-pass?**
-Single retrieval often misses bridging information needed for complex queries. Iterative sub-question decomposition ensures evidence is gathered across multiple reasoning steps before synthesis.
-
-**Why arXiv abstracts as the knowledge base?**
-Abstracts provide dense, factual NLP/ML domain knowledge in a compact form — ideal for testing model groundedness on technical questions.
-
----
-
-## 🛠️ Tech Stack
-
-| Category | Tools |
-|---|---|
-| **LLM** | DeepSeek-R1-Distill-Qwen-1.5B |
-| **Fine-Tuning** | PEFT (LoRA), TRL (SFTTrainer), BitsAndBytes (4-bit NF4) |
-| **RAG** | FAISS, Sentence-Transformers (`all-MiniLM-L6-v2`) |
-| **Evaluation** | `evaluate` (BLEU, ROUGE), `bert_score`, Sentence-Transformers |
-| **Interface** | Gradio |
-| **Framework** | PyTorch, HuggingFace Transformers, Datasets, Accelerate |
-
----
-
-## 🔮 Future Work
-
-- [ ] Extend knowledge base with domain-specific corpora (e.g. financial reports, regulatory documents)
-- [ ] Add re-ranking step (cross-encoder) between FAISS retrieval and synthesis
-- [ ] Implement streaming inference for lower perceived latency in the Gradio UI
-- [ ] Benchmark against RAG-only (no fine-tuning) and fine-tune-only (no retrieval) baselines more comprehensively
-- [ ] Add LangChain / LangGraph orchestration layer for production deployment
-
----
-
-## 📚 References
-
-- [QLoRA: Efficient Finetuning of Quantized LLMs](https://arxiv.org/abs/2305.14314) — Dettmers et al., 2023
-- [PEFT: Parameter-Efficient Fine-Tuning](https://github.com/huggingface/peft) — HuggingFace
-- [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks](https://arxiv.org/abs/2005.11401) — Lewis et al., 2020
-- [DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B) — DeepSeek AI
-- [Alpaca-Cleaned Dataset](https://huggingface.co/datasets/yahma/alpaca-cleaned) — yahma
-
----
-
-## 📄 License
-
-MIT License — see [LICENSE](LICENSE) for details.
-
----
-
-*Developed as coursework for the Neural Systems and Natural Language Processing module — MSc Artificial Intelligence, De Montfort University.*
+MIT, see [LICENSE](LICENSE).
