@@ -3,10 +3,11 @@ src/llm.py
 Pluggable LLM backends behind one small interface.
 
     hf:<path-or-hub-id>          local transformers model (e.g. the QLoRA merged model)
-    openai:<model>@<base_url>    any OpenAI-compatible server: vLLM, Ollama, TGI, or a hosted API
+    openai:<model>@<base_url>    a checkpoint served by vLLM, Ollama or TGI
 
-The pipeline only ever calls `generate(...)`, so retrieval, evaluation and the
-API service are identical whichever backend serves the model.
+The pipeline only ever calls `generate(...)`, so the base model and every
+fine-tuned checkpoint go through identical retrieval, evaluation and serving,
+whether loaded in-process or behind a production inference server.
 
 Usage:
     llm = make_llm("openai:deepseek-r1-1.5b@http://localhost:8000/v1")
@@ -122,8 +123,8 @@ class HFLLM:
 
 class OpenAICompatibleLLM:
     """
-    Calls /chat/completions on vLLM, Ollama (`/v1`), TGI or a hosted provider.
-    The API key, if any, is read from OPENAI_API_KEY.
+    Calls /chat/completions on an OpenAI-compatible inference server (vLLM,
+    Ollama `/v1`, TGI). An API key, if the server needs one, is read from OPENAI_API_KEY.
     """
 
     def __init__(self, model: str, base_url: str, timeout_s: float = 120.0, max_retries: int = 3,

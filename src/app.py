@@ -3,8 +3,8 @@ src/app.py
 Gradio demo for the multi-hop RAG pipeline.
 
 Uses the same environment configuration as the API service (QMR_LLM,
-QMR_INDEX_DIR, ...), so the demo can run against a local model or any
-OpenAI-compatible endpoint.
+QMR_INDEX_DIR, ...), so the demo can run the model in-process or through a
+vLLM / Ollama server.
 
 Usage:
     python -m src.app

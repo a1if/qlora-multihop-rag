@@ -7,7 +7,7 @@
 #   curl -s localhost:8080/v1/answer -H 'content-type: application/json' \
 #        -d '{"question": "Which country was the discoverer of polonium born in?"}'
 #
-# To use vLLM or a hosted endpoint instead, change QMR_LLM (and set OPENAI_API_KEY if needed).
+# To serve the fine-tuned checkpoint, run it under vLLM and point QMR_LLM at that server.
 
 services:
   ollama:

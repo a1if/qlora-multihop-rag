@@ -7,7 +7,7 @@ Each system is "<model>:<mode>":
     mode   closed | single | iterative | decompose (see src/rag_pipeline.py)
 
 SPEC is any src/llm.py backend, so the same benchmark runs against a local
-transformers model, a vLLM / Ollama server or a hosted OpenAI-compatible API.
+transformers model or a checkpoint served by vLLM / Ollama.
 
 Reports, per system:
     EM / F1 with 95% bootstrap CIs (official HotpotQA answer normalisation)

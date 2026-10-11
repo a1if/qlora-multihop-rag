@@ -4,9 +4,9 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
 
-A multi-hop retrieval-augmented generation service with **pluggable LLM backends**, a **FastAPI** serving layer with Prometheus metrics, a **reproducible HotpotQA benchmark harness**, and a **QLoRA** fine-tuning pipeline for the reader model.
+An end-to-end project on **improving a small open LLM (DeepSeek-R1-Distill-Qwen-1.5B) for multi-hop question answering**: QLoRA fine-tuning of the reader model, a multi-hop retrieval pipeline, and a reproducible HotpotQA benchmark that measures how much each change actually helps.
 
-The same pipeline code runs against an in-process Hugging Face model, a vLLM or Ollama server, or a hosted OpenAI-compatible API. Retrieval, evaluation and serving don't change when the model does.
+Around the model sits the engineering needed to iterate on it and ship it: a benchmark harness with significance testing, a FastAPI service with Prometheus metrics, and serving of your own checkpoints in-process or through vLLM / Ollama.
 
 ---
 
@@ -15,7 +15,7 @@ The same pipeline code runs against an in-process Hugging Face model, a vLLM or 
 | Area | What's here |
 |---|---|
 | **Retrieval strategies** | `closed` (no retrieval), `single`-hop, `iterative` (LLM writes a follow-up search query from what it found), `decompose` (LLM splits the question up front). Every mode gives the reader the **same passage budget k**, so comparisons are fair. |
-| **Backend abstraction** | `hf:<path>` or `openai:<model>@<base_url>`: one `LLM` protocol, swappable by config ([src/llm.py](src/llm.py)) |
+| **Serving your checkpoints** | Same pipeline runs the base or fine-tuned model in-process (`hf:<path>`) or served by vLLM / Ollama (`openai:<model>@<url>`), so every checkpoint is benchmarked and served identically ([src/llm.py](src/llm.py)) |
 | **Serving** | FastAPI `/v1/answer` with request validation, request-ID propagation, structured JSON logs, `/healthz` + `/readyz`, Prometheus `/metrics` with per-stage latency histograms ([src/api.py](src/api.py)) |
 | **Evaluation** | HotpotQA distractor dev set with official EM/F1, supporting-paragraph recall@k, bootstrap 95% CIs, paired-bootstrap significance against a reference system, p50/p95 latency and LLM-call cost per question ([src/eval_hotpotqa.py](src/eval_hotpotqa.py)) |
 | **Reliability** | Resumable JSONL predictions, concurrent evaluation over HTTP backends, thread-safe per-request timing, retries/timeouts on the HTTP client |
@@ -33,7 +33,7 @@ flowchart LR
     P -->|search| R["DenseRetriever<br/>FAISS inner-product<br/>MiniLM embeddings"]
     P -->|generate| L{{"LLM protocol"}}
     L --> HF["HFLLM<br/>in-process transformers<br/>(QLoRA merged model)"]
-    L --> OA["OpenAICompatibleLLM<br/>vLLM · Ollama · hosted API"]
+    L --> OA["OpenAICompatibleLLM<br/>your checkpoint on vLLM / Ollama"]
     E["Benchmark harness<br/>HotpotQA"] --> P
 ```
 
@@ -80,7 +80,7 @@ Response (shape):
 }
 ```
 
-To point at vLLM or a hosted endpoint, change `QMR_LLM` (and set `OPENAI_API_KEY` if the endpoint needs one).
+To serve the fine-tuned checkpoint instead, run it with vLLM (`vllm serve ./new_merged_model_fp32`) and point `QMR_LLM` at it.
 
 ### Run locally
 
