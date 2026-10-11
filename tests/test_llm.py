@@ -17,11 +17,11 @@ def mock_client(captured):
 
 def test_openai_backend_greedy_payload():
     captured = []
-    llm = OpenAICompatibleLLM("deepseek-r1:1.5b", "http://llm.test/v1", client=mock_client(captured))
+    llm = OpenAICompatibleLLM("qwen3:1.7b", "http://llm.test/v1", client=mock_client(captured))
     assert llm.generate("Q?", max_new_tokens=16) == "Answer: Poland"
     path, payload, _ = captured[0]
     assert path == "/v1/chat/completions"
-    assert payload["model"] == "deepseek-r1:1.5b"
+    assert payload["model"] == "qwen3:1.7b"
     assert payload["max_tokens"] == 16
     assert payload["temperature"] == 0.0 and "top_p" not in payload
 
@@ -41,8 +41,8 @@ def test_api_key_read_from_env(monkeypatch):
 
 
 def test_make_llm_parses_ollama_style_model_names():
-    llm = make_llm("openai:deepseek-r1:1.5b@http://localhost:11434/v1")
-    assert llm.model == "deepseek-r1:1.5b"
+    llm = make_llm("openai:qwen3:1.7b@http://localhost:11434/v1")
+    assert llm.model == "qwen3:1.7b"
     assert str(llm.client.base_url).startswith("http://localhost:11434/v1")
 
 

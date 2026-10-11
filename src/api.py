@@ -12,7 +12,7 @@ Configuration comes from environment variables (see Settings below), so the
 same image serves the model in-process or in front of a vLLM / Ollama server.
 
 Usage:
-    QMR_LLM=openai:deepseek-r1:1.5b@http://localhost:11434/v1 \\
+    QMR_LLM=openai:qwen3:1.7b@http://localhost:11434/v1 \\
         uvicorn src.api:app --host 0.0.0.0 --port 8080
 """
 

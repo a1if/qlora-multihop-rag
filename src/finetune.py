@@ -1,6 +1,6 @@
 """
 src/finetune.py
-QLoRA fine-tuning pipeline for DeepSeek-R1-Distill-Qwen-1.5B.
+QLoRA fine-tuning pipeline (default base: Qwen3-1.7B).
 
 Usage:
     from src.finetune import run_finetuning

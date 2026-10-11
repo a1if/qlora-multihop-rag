@@ -76,7 +76,7 @@ Legend: `[x]` done · `[ ]` todo · `[~]` written but not checked against real m
 - [ ] Check `LICENSE` holder/year
 
 ### Phase 2: Fine-tuning depth (the core story)
-Compute: free Colab / Kaggle T4, or a rented GPU; QLoRA on 1.5B fits in 16 GB.
+Compute: local RTX 5070 (12 GB). Models load straight from Hugging Face via the `hf:` backend. Blackwell needs a PyTorch build for CUDA 12.8+; bf16 is supported.
 
 Infrastructure
 - [ ] Config-driven training runs (YAML/dataclass per experiment, run name, seed)
@@ -84,8 +84,9 @@ Infrastructure
 - [ ] Eval-on-checkpoint: every training run ends with the HotpotQA benchmark on a fixed dev slice
 - [ ] Held-out split hygiene: train on HotpotQA *train*, report on *dev*, never tune on the final test slice
 
-Baseline
-- [ ] Base model, all four retrieval modes, n=500 (the "before" row)
+Baseline and model choice
+- [x] Fine-tuning base: **Qwen3-1.7B** (defaults switched; thinking toggled via `enable_thinking`; bf16)
+- [ ] Base-model comparison, all four retrieval modes, n=500: R1-Distill-1.5B vs Qwen3-1.7B vs Qwen3.5-2B (the "before" rows)
 
 Reader fine-tuning (RAFT-style SFT)
 - [ ] Data builder: HotpotQA train question + gold passages + distractors → short answer with passage citations
@@ -100,16 +101,20 @@ Ablations (what makes the fine-tune work)
 - [ ] Distractor ratio in training contexts (robustness to irrelevant passages)
 - [ ] With vs without reasoning traces in targets
 
-Going deeper
-- [ ] Fine-tune the follow-up query generator for iterative retrieval; measure support recall@k gain
-- [ ] Preference tuning (DPO) on correct vs incorrect / unfaithful answers
+Going deeper (each targets one LLM call in the pipeline and has its own metric)
+- [ ] Citations: train answers to cite supporting passages; metric = citation precision/recall vs HotpotQA supporting facts
+- [ ] Abstention: train "insufficient evidence" when gold passages are removed; metric = hallucination rate on unanswerable variants
+- [ ] Query generator: train the hop-2 follow-up query on HotpotQA bridge entities; metric = support recall@k / all-support@k
+- [ ] Retriever: contrastive fine-tune of the MiniLM embedder on question → gold passages; metric = recall@k (cheap, minutes on the 5070)
+- [ ] Reasoning distillation: rationales from a larger open teacher (e.g. Qwen3-8B, 4-bit), keep only correct ones; compare accuracy vs tokens/latency
+- [ ] Preference tuning (DPO) on correct/grounded vs wrong/unsupported answers sampled from our own SFT model
 - [ ] Error analysis: bridge vs comparison, failure categories, before/after examples
 
 ### Phase 3: Validate serving end-to-end
 - [ ] Smoke run of the harness with a real model (`--n 20`)
 - [ ] Fix whatever the first real run turns up (dataset loading, prompts, answer parsing)
 - [ ] Serve the best checkpoint with vLLM or Ollama; API `curl /v1/answer` works
-- [ ] `docker compose` stack up end-to-end (local Docker daemon currently returns 500; Ollama not installed)
+- [ ] Optional: `docker compose` stack (Docker daemon currently returns 500). Not needed for training or benchmarking.
 
 ### Phase 4: Write-up
 - [ ] README results: baseline vs fine-tuned table, ablation tables, scaling plot

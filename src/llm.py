@@ -10,7 +10,7 @@ fine-tuned checkpoint go through identical retrieval, evaluation and serving,
 whether loaded in-process or behind a production inference server.
 
 Usage:
-    llm = make_llm("openai:deepseek-r1-1.5b@http://localhost:8000/v1")
+    llm = make_llm("openai:qwen3-1.7b@http://localhost:8000/v1")
     llm = make_llm("hf:./new_merged_model_fp32", prompt_style="alpaca")
 """
 
@@ -38,11 +38,12 @@ class HFLLM:
     In-process transformers model.
 
     prompt_style:
-        "chat"    the tokenizer's chat template (DeepSeek-R1-Distill native)
-        "alpaca"  "### Instruction / ### Response" format used in finetune.py
+        "chat"    the tokenizer's chat template (Qwen3 / R1-Distill native)
+        "alpaca"  plain "### Instruction / ### Response" format
     reasoning:
-        False skips the R1 <think> phase by pre-filling an empty think block,
-        which makes short-answer evaluation roughly 10x cheaper.
+        False turns off the <think> phase: Qwen3 templates do this via
+        `enable_thinking=False`; for templates without that switch (R1-Distill)
+        an empty think block is pre-filled. Short answers get ~10x cheaper.
     """
 
     def __init__(self, model_path: str, prompt_style: str = "chat", reasoning: bool = False,
@@ -56,14 +57,15 @@ class HFLLM:
         self.reasoning = reasoning
 
         cuda = torch.cuda.is_available()
+        dtype = torch.float32
+        if cuda:
+            dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         quant = None
         if load_in_4bit and cuda:
-            quant = BitsAndBytesConfig(
-                load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.float16
-            )
+            quant = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=dtype)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=torch.float16 if cuda else torch.float32,
+            torch_dtype=dtype,
             quantization_config=quant,
             device_map="auto" if cuda else None,
             trust_remote_code=True,
@@ -78,10 +80,11 @@ class HFLLM:
             return f"### Instruction:\n{instruction}\n\n### Response:\n"
 
         prompt = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": instruction}], tokenize=False, add_generation_prompt=True
+            [{"role": "user", "content": instruction}], tokenize=False, add_generation_prompt=True,
+            enable_thinking=self.reasoning,   # Qwen3 switch; ignored by other templates
         )
-        if not self.reasoning:
-            # Newer R1 templates already open the think block for us.
+        if not self.reasoning and "</think>" not in prompt[-64:]:
+            # Template has no thinking switch (R1-Distill): close the think block ourselves.
             prompt += "\n</think>\n\n" if prompt.rstrip().endswith("<think>") else "<think>\n\n</think>\n\n"
         return prompt
 

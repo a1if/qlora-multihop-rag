@@ -22,7 +22,7 @@ resumes where it stopped.
 Usage:
     # smoke test against a local Ollama model
     python -m src.eval_hotpotqa --n 20 \\
-        --model base=openai:deepseek-r1:1.5b@http://localhost:11434/v1 \\
+        --model base=openai:qwen3:1.7b@http://localhost:11434/v1 \\
         --systems base:closed base:single --workers 4
 
     # full ablation: base model vs the QLoRA fine-tune, both served by vLLM
@@ -70,7 +70,7 @@ def parse_args(argv=None):
     p.add_argument("--top-k", type=int, default=rag.top_k)
     p.add_argument("--hops", type=int, default=rag.num_hops)
     p.add_argument("--prompt-style", choices=["chat", "alpaca"], default=rag.prompt_style)
-    p.add_argument("--reasoning", action="store_true", help="allow R1 <think> reasoning (much slower)")
+    p.add_argument("--reasoning", action="store_true", help="allow <think> reasoning (much slower)")
     p.add_argument("--load-in-4bit", action="store_true", help="hf backend only")
     p.add_argument("--summarize-only", action="store_true")
     args = p.parse_args(argv)

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 @dataclass
 class FinetuneConfig:
     # ── Model ────────────────────────────────────────────────────────────────
-    base_model_name: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+    base_model_name: str = "Qwen/Qwen3-1.7B"
     merged_output_dir: str = "./new_merged_model_fp32"
     adapter_output_dir: str = "./new_adapter"
 
@@ -22,7 +22,7 @@ class FinetuneConfig:
     # ── Quantisation ─────────────────────────────────────────────────────────
     use_4bit: bool = True
     bnb_4bit_quant_type: str = "nf4"             # nf4 | fp4
-    bnb_4bit_compute_dtype: str = "float16"      # float16 | bfloat16
+    bnb_4bit_compute_dtype: str = "bfloat16"     # float16 | bfloat16
     use_double_quant: bool = False
 
     # ── LoRA ─────────────────────────────────────────────────────────────────
@@ -45,8 +45,8 @@ class FinetuneConfig:
     lr_scheduler_type: str = "linear"
     optim: str = "paged_adamw_32bit"
     max_grad_norm: float = 1.0
-    fp16: bool = True
-    bf16: bool = False                             # set True on Ampere+ GPUs
+    fp16: bool = False
+    bf16: bool = True                              # Ampere+ (RTX 30xx and newer); else fp16
     gradient_checkpointing: bool = True
     group_by_length: bool = True
 
@@ -77,11 +77,11 @@ class RAGConfig:
 
     # ── LLM Backend (see src/llm.py) ──────────────────────────────────────────
     # hf:<path-or-hub-id>  |  openai:<model>@<base_url>  (vLLM, Ollama, hosted APIs)
-    llm: str = "hf:deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+    llm: str = "hf:Qwen/Qwen3-1.7B"
 
     # ── Generation ────────────────────────────────────────────────────────────
     prompt_style: str = "chat"                     # chat | alpaca
-    reasoning: bool = False                        # let R1 emit <think> before answering
+    reasoning: bool = False                        # let the model emit <think> before answering
     reasoning_token_budget: int = 512              # extra tokens when reasoning=True
     load_in_4bit: bool = False                     # hf backend only
     max_new_tokens: int = 48                       # short answers (benchmarks)

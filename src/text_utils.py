@@ -15,7 +15,7 @@ _LIST_PREFIX = re.compile(
 
 def strip_reasoning(text: str) -> str:
     """
-    Remove DeepSeek-R1 style <think>...</think> reasoning.
+    Remove <think>...</think> reasoning (Qwen3 / DeepSeek-R1 style).
 
     Handles three cases: a complete block, a block whose opening tag was part
     of the prompt (only `</think>` appears), and reasoning that was cut off
