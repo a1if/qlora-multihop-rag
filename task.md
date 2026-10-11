@@ -2,7 +2,7 @@
 
 Branch: `eval-hotpotqa` · PR #1 open, CI green · Tests: 57 passing · Lint: clean
 
-Goal: show how far a small open LLM (DeepSeek-R1-Distill-Qwen-1.5B) can be improved for multi-hop QA through fine-tuning, measured on HotpotQA, with the engineering around it (training pipeline, eval harness, serving own checkpoints, tests, CI). No cloud/hosted models: every model in the results is one we trained or its base.
+Goal: take **one** small open model (Qwen3-1.7B) and improve it step by step for multi-hop QA with RAG and fine-tuning, measuring every step on HotpotQA. No model comparisons, no cloud models. The resume story is the skills: RAG design, fine-tuning (QLoRA/LoRA, retriever tuning), evaluation, and shipping it as a service.
 
 Legend: `[x]` done · `[ ]` todo · `[~]` written but not checked against real models/data
 
@@ -75,53 +75,51 @@ Legend: `[x]` done · `[ ]` todo · `[~]` written but not checked against real m
 - [x] Reframe docs around fine-tuning (no hosted-API pitch)
 - [ ] Check `LICENSE` holder/year
 
-### Phase 2: Fine-tuning depth (the core story)
-Compute: local RTX 5070 (12 GB). Models load straight from Hugging Face via the `hf:` backend. Blackwell needs a PyTorch build for CUDA 12.8+; bf16 is supported.
+### Phase 2: Improvement ladder (the core story)
+One model, Qwen3-1.7B. Each stage adds one technique on top of the previous one and gets a row in the results table (EM, F1, retrieval recall@k, latency).
+Compute: local RTX 5070 (12 GB), models straight from Hugging Face (`hf:` backend). Needs PyTorch built for CUDA 12.8+; bf16 supported.
 
-Infrastructure
-- [ ] Config-driven training runs (YAML/dataclass per experiment, run name, seed)
-- [ ] Experiment tracking (W&B or MLflow): loss curves, config, eval metrics per checkpoint
-- [ ] Eval-on-checkpoint: every training run ends with the HotpotQA benchmark on a fixed dev slice
-- [ ] Held-out split hygiene: train on HotpotQA *train*, report on *dev*, never tune on the final test slice
+Setup
+- [x] Model: **Qwen3-1.7B** (thinking toggled via `enable_thinking`; bf16)
+- [ ] Local GPU environment (PyTorch CUDA 12.8+, bitsandbytes, PEFT, TRL)
+- [ ] Smoke run of the harness on the real model (`--n 20`); fix what it turns up
+- [ ] Split hygiene: train on HotpotQA *train*, report on a fixed *dev* sample (n=500)
+- [ ] Experiment tracking (W&B or MLflow): config, loss curves, eval per run
 
-Baseline and model choice
-- [x] Fine-tuning base: **Qwen3-1.7B** (defaults switched; thinking toggled via `enable_thinking`; bf16)
-- [ ] Base-model comparison, all four retrieval modes, n=500: R1-Distill-1.5B vs Qwen3-1.7B vs Qwen3.5-2B (the "before" rows)
+The ladder
+- [ ] Stage 0: no retrieval (closed-book baseline)
+- [ ] Stage 1: + RAG, single-hop dense retrieval
+- [ ] Stage 2: + multi-hop retrieval (iterative follow-up search; decompose as a comparison)
+- [ ] Stage 3: + better retrieval: hybrid BM25 + dense, cross-encoder reranker
+- [ ] Stage 4: + fine-tuned retriever (contrastive tuning of the embedder on question → gold passages)
+- [ ] Stage 5: + fine-tuned model, QLoRA SFT, one LoRA adapter trained on two tasks:
+  - reader: question + gold and distractor passages → short answer with citations, "insufficient evidence" when gold is missing
+  - query writer: question + hop-1 passages → hop-2 search query (bridge entity)
+- [ ] Stage 6 (optional): + DPO on grounded vs unsupported answers sampled from the Stage 5 model
 
-Reader fine-tuning (RAFT-style SFT)
-- [ ] Data builder: HotpotQA train question + gold passages + distractors → short answer with passage citations
-- [ ] Rewrite `src/finetune.py` for this data (chat template, loss on the answer tokens only)
-- [ ] First SFT run → benchmark `ft:single`, `ft:iterative` vs base
+Code needed for the ladder
+- [ ] Data builder for the SFT tasks (`src/data_sft.py`)
+- [ ] Rewrite `src/finetune.py`: chat template, loss on answer tokens only, bf16, config per run
+- [ ] Retriever fine-tuning script (`src/finetune_retriever.py`)
+- [ ] BM25 + reranker in `src/retriever.py`
+- [ ] Harness: select retriever variant per stage (`--retriever dense|hybrid|tuned`)
+- [ ] Extra metrics: citation precision/recall, hallucination rate on unanswerable variants
 
-Ablations (what makes the fine-tune work)
-- [ ] LoRA rank: 8 / 32 / 128
-- [ ] Target modules: attention-only vs all projections
+Understanding why it works (small ablations on Stage 5)
+- [ ] LoRA rank 8 vs 32 vs 128
 - [ ] QLoRA 4-bit vs 16-bit LoRA (quality vs memory)
-- [ ] Training-set size: 1k / 5k / 20k examples (scaling curve)
-- [ ] Distractor ratio in training contexts (robustness to irrelevant passages)
-- [ ] With vs without reasoning traces in targets
+- [ ] Training-set size 1k / 5k / 20k
+- [ ] Error analysis: bridge vs comparison questions, before/after examples
 
-Going deeper (each targets one LLM call in the pipeline and has its own metric)
-- [ ] Citations: train answers to cite supporting passages; metric = citation precision/recall vs HotpotQA supporting facts
-- [ ] Abstention: train "insufficient evidence" when gold passages are removed; metric = hallucination rate on unanswerable variants
-- [ ] Query generator: train the hop-2 follow-up query on HotpotQA bridge entities; metric = support recall@k / all-support@k
-- [ ] Retriever: contrastive fine-tune of the MiniLM embedder on question → gold passages; metric = recall@k (cheap, minutes on the 5070)
-- [ ] Reasoning distillation: rationales from a larger open teacher (e.g. Qwen3-8B, 4-bit), keep only correct ones; compare accuracy vs tokens/latency
-- [ ] Preference tuning (DPO) on correct/grounded vs wrong/unsupported answers sampled from our own SFT model
-- [ ] Error analysis: bridge vs comparison, failure categories, before/after examples
-
-### Phase 3: Validate serving end-to-end
-- [ ] Smoke run of the harness with a real model (`--n 20`)
-- [ ] Fix whatever the first real run turns up (dataset loading, prompts, answer parsing)
+### Phase 3: Ship the final model
 - [ ] Serve the best checkpoint with vLLM or Ollama; API `curl /v1/answer` works
 - [ ] Optional: `docker compose` stack (Docker daemon currently returns 500). Not needed for training or benchmarking.
 
 ### Phase 4: Write-up
-- [ ] README results: baseline vs fine-tuned table, ablation tables, scaling plot
+- [ ] README results: ladder table (Stage 0 → final), ablation table, data-size plot
+- [ ] README "What I learned" section
 - [ ] Publish adapter to Hugging Face Hub with a model card
 - [ ] Final resume bullets with real numbers
 
 ### Optional
-- [ ] Hybrid retrieval (BM25 + dense) and cross-encoder reranker
-- [ ] Faithfulness / citation-accuracy metric
 - [ ] Streaming responses in the API

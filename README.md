@@ -101,6 +101,21 @@ QMR_LLM=openai:qwen3:1.7b@http://localhost:11434/v1 QMR_INDEX_DIR=indexes/hotpot
 
 ---
 
+## Improvement ladder
+
+One model, Qwen3-1.7B, improved one technique at a time. Every stage is measured on the same 500 HotpotQA dev questions.
+
+| Stage | Adds | Technique |
+|---|---|---|
+| 0 | Baseline | Closed-book: the model answers from its own weights |
+| 1 | RAG | Single-hop dense retrieval (FAISS + MiniLM) |
+| 2 | Multi-hop RAG | Iterative retrieval: the model writes a follow-up search query from what it found |
+| 3 | Better retrieval | Hybrid BM25 + dense search, cross-encoder reranking |
+| 4 | Retriever fine-tuning | Contrastive tuning of the embedding model on question → supporting passages |
+| 5 | LLM fine-tuning | QLoRA SFT, one adapter for two tasks: grounded reader (citations, abstains when evidence is missing) and hop-2 query writer |
+
+<!-- Results table goes here: EM, F1, support recall@k, latency per stage. -->
+
 ## Benchmark: HotpotQA
 
 `src/eval_hotpotqa.py` samples N questions from the HotpotQA distractor dev set with a fixed seed. It pools all their paragraphs (2 gold + 8 distractors each) into one corpus, so the retriever has to find the right 2 among roughly 10×N. It then runs any set of `<model>:<mode>` systems:
