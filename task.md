@@ -22,7 +22,7 @@ Next steps, in order:
 1. Finish the baseline (decompose resumes from 231/500; now batched, so much faster):
    `python -m src.eval_hotpotqa --n 500 --systems base:closed base:single base:iterative base:decompose --reference base:single --out results/baseline`
 2. Batching check: rerun `base:single base:iterative` with `--out results/batched`; compare wall time and answers with `results/baseline`
-3. Training throughput sweep: `python -m src.finetune --set max_steps=40 --set merge_after_training=false --set run_name=speed_<variant> ...` over lora/qlora × gradient checkpointing on/off × batch size
+3. ~~Training throughput sweep~~ (done, see Speed): `python -m src.finetune --set max_steps=40 --set merge_after_training=false --set run_name=speed_<variant> ...` over lora/qlora × gradient checkpointing on/off × batch size
 4. First full SFT run, then benchmark `ft:single ft:iterative`
 
 Environment (every new shell):
@@ -117,17 +117,17 @@ Setup
 - [x] Local GPU environment at `D:\qmr` (C: is full): torch 2.11+cu128, transformers 5.19, peft 0.21, trl 1.15, bitsandbytes 0.50 (`scripts/setup_gpu_env.ps1`)
 - [x] Smoke run on the real model (`--n 20`): pipeline works end to end. Fixed `torch_dtype` → `dtype` for transformers 5
   - finding: base model's hop-2 queries changed retrieval on 12/20 questions but found 0 extra gold passages, which motivates Stages 4–5
-- [~] Full baseline n=500 for Stages 0–2: closed, single, iterative done; decompose paused at 231/500 (resumes automatically)
+- [x] Full baseline n=500 for Stages 0–2 (`results/baseline/summary.md`)
 - [ ] Split hygiene: train on HotpotQA *train*, report on a fixed *dev* sample (n=500)
 - [ ] Experiment tracking (W&B or MLflow): config, loss curves, eval per run
 
 The ladder
 - [x] Stage 0: no retrieval (closed-book baseline): EM 10.4 · F1 13.9
 - [x] Stage 1: + RAG, single-hop dense retrieval: EM 34.0 · F1 43.2 · support R@5 75.3%
-- [~] Stage 2: + multi-hop retrieval: iterative EM 37.2 · F1 47.8 (+4.6 F1 vs single, 95% CI [+1.7, +7.5]) · support R@5 77.8%; decompose pending
+- [x] Stage 2: + multi-hop retrieval: iterative EM 37.2 · F1 47.8 (+4.6 F1 vs single, 95% CI [+1.7, +7.5]) · support R@5 77.8%. Decompose: EM 34.6 · F1 43.8 (+0.6, n.s.), so iterative is the multi-hop strategy going forward
 - [ ] Stage 3: + better retrieval: hybrid BM25 + dense, cross-encoder reranker
 - [ ] Stage 4: + fine-tuned retriever (contrastive tuning of the embedder on question → gold passages)
-- [ ] Stage 5: + fine-tuned model, QLoRA SFT, one LoRA adapter trained on two tasks:
+- [~] Stage 5: + fine-tuned model, LoRA SFT (first run `sft_10k`: 10k examples, ~1 h, running), one LoRA adapter trained on two tasks:
   - reader: question + gold and distractor passages → short answer with citations, "insufficient evidence" when gold is missing
   - query writer: question + hop-1 passages → hop-2 search query (bridge entity)
 - [ ] Stage 6 (optional): + DPO on grounded vs unsupported answers sampled from the Stage 5 model
@@ -143,8 +143,19 @@ Code needed for the ladder
 
 Speed
 - [x] Dynamic batching for local-model evaluation and the API (`src/batching.py`, `--workers 16` default)
-- [ ] Verify batching on GPU: wall time vs unbatched baseline, and answer agreement on the same 500 questions
-- [ ] Training throughput sweep (see above)
+- [x] Batching verified on GPU: single 4m10s → 1m36s (2.6×), iterative 11m23s → 3m27s (3.3×); 95–98% identical answers, EM within ±0.2
+- [x] Training throughput sweep (`scripts/speed_sweep.py`, 20 steps, effective batch 16):
+
+  | Setup | Tokens/s | Speed | Peak VRAM |
+  |---|---|---|---|
+  | LoRA, full logits, bs4 (before) | 857 | 1.00× | 10.8 GB |
+  | **LoRA, answer-span logits, bs4** | **2418** | **2.82×** | **4.9 GB** |
+  | LoRA, answer-span, bs8 | 2158 | 2.52× | 6.0 GB |
+  | QLoRA 4-bit, answer-span, bs8 | 1954 | 2.28× | 5.6 GB |
+  | LoRA, answer-span, bs16 | 1236 | 1.44× | 9.1 GB |
+  | no gradient checkpointing (bs4, bs8) | OOM | – | – |
+
+  Answer-span logits (LM head only over answer tokens) fixed an OOM at bs8 (>13.5 GB → 6.0 GB) and is the main speed-up. Defaults set to LoRA bs4 × GA4.
 
 Understanding why it works (small ablations on Stage 5)
 - [ ] LoRA rank 8 vs 32 vs 128

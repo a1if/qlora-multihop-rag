@@ -40,8 +40,8 @@ class FinetuneConfig:
     # ── Optimisation ─────────────────────────────────────────────────────────
     num_train_epochs: float = 1.0
     max_steps: int = -1                            # > 0 overrides epochs (throughput tests)
-    per_device_train_batch_size: int = 8
-    gradient_accumulation_steps: int = 2           # effective batch = 16
+    per_device_train_batch_size: int = 4            # fastest on a 12 GB RTX 5070 (scripts/speed_sweep.py)
+    gradient_accumulation_steps: int = 4           # effective batch = 16
     learning_rate: float = 2e-4
     weight_decay: float = 0.0
     warmup_ratio: float = 0.03
