@@ -82,6 +82,13 @@ Response (shape):
 
 To serve the fine-tuned checkpoint instead, run it with vLLM (`vllm serve ./new_merged_model_fp32`) and point `QMR_LLM` at it.
 
+### GPU environment (training and local inference)
+
+```powershell
+.\scripts\setup_gpu_env.ps1 -EnvRoot D:\qmr   # venv + Hugging Face cache (~15 GB), PyTorch for CUDA 12.8
+$env:HF_HOME = "D:\qmr\hf-cache"; & D:\qmr\venv\Scripts\Activate.ps1
+```
+
 ### Run locally
 
 ```bash

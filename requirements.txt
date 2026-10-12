@@ -1,13 +1,13 @@
 # ─── Core ML ──────────────────────────────────────────────────────────────────
-torch>=2.1.0
-transformers>=4.40.0
+torch>=2.7.0                   # RTX 50-series needs a CUDA 12.8 build: see scripts/setup_gpu_env.ps1
+transformers>=4.56.0             # `dtype=` argument; tested on 5.19
 accelerate>=0.28.0
 datasets>=2.18.0
 
 # ─── Fine-Tuning ──────────────────────────────────────────────────────────────
 peft>=0.10.0
 trl>=0.8.0
-bitsandbytes>=0.43.0          # 4-bit NF4 quantisation (requires CUDA)
+bitsandbytes>=0.45.0          # 4-bit NF4 quantisation (CUDA; native Windows wheels)
 
 # ─── RAG / Retrieval ──────────────────────────────────────────────────────────
 faiss-cpu>=1.8.0               # swap for faiss-gpu if GPU FAISS available

@@ -160,7 +160,7 @@ def merge_and_save(adapter_path: str, output_dir: str):
     peft_model = AutoPeftModelForCausalLM.from_pretrained(
         adapter_path,
         device_map="cpu",
-        torch_dtype=torch.float16,
+        dtype=torch.bfloat16,
     )
     merged = peft_model.merge_and_unload()
 

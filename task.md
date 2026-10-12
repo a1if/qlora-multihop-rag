@@ -50,6 +50,7 @@ Legend: `[x]` done · `[ ]` todo · `[~]` written but not checked against real m
 | `requirements.txt` | [x] | Full set (training + serving); old BLEU/ROUGE deps removed |
 | `requirements-serve.txt` | [x] | API + benchmark, no GPU |
 | `requirements-dev.txt` | [x] | Tests + lint |
+| `scripts/setup_gpu_env.ps1` | [x] | Windows GPU env: venv + HF cache on another drive, PyTorch CUDA 12.8 |
 | `Dockerfile` | [x] | CPU API image, non-root, healthcheck (builds in CI) |
 | `docker-compose.yml` | [~] | Ollama + indexer + API stack (not run yet) |
 | `.dockerignore` | [x] | |
@@ -81,8 +82,10 @@ Compute: local RTX 5070 (12 GB), models straight from Hugging Face (`hf:` backen
 
 Setup
 - [x] Model: **Qwen3-1.7B** (thinking toggled via `enable_thinking`; bf16)
-- [ ] Local GPU environment (PyTorch CUDA 12.8+, bitsandbytes, PEFT, TRL)
-- [ ] Smoke run of the harness on the real model (`--n 20`); fix what it turns up
+- [x] Local GPU environment at `D:\qmr` (C: is full): torch 2.11+cu128, transformers 5.19, peft 0.21, trl 1.15, bitsandbytes 0.50 (`scripts/setup_gpu_env.ps1`)
+- [x] Smoke run on the real model (`--n 20`): pipeline works end to end. Fixed `torch_dtype` → `dtype` for transformers 5
+  - finding: base model's hop-2 queries changed retrieval on 12/20 questions but found 0 extra gold passages, which motivates Stages 4–5
+- [ ] Full baseline n=500 for Stages 0–2 (running → `results/baseline/summary.md`)
 - [ ] Split hygiene: train on HotpotQA *train*, report on a fixed *dev* sample (n=500)
 - [ ] Experiment tracking (W&B or MLflow): config, loss curves, eval per run
 

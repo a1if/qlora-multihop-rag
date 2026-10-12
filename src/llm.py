@@ -65,7 +65,7 @@ class HFLLM:
             quant = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=dtype)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=dtype,
+            dtype=dtype,
             quantization_config=quant,
             device_map="auto" if cuda else None,
             trust_remote_code=True,
