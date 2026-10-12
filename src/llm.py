@@ -31,6 +31,27 @@ class LLM(Protocol):
         ...
 
 
+# ─── Prompt Rendering ─────────────────────────────────────────────────────────
+
+def render_prompt(tokenizer, instruction: str, prompt_style: str = "chat", reasoning: bool = False) -> str:
+    """
+    Text fed to the model for one user instruction, up to where the answer starts.
+    Shared by inference (HFLLM) and fine-tuning (src/finetune.py) so both see
+    exactly the same format.
+    """
+    if prompt_style == "alpaca":
+        return f"### Instruction:\n{instruction}\n\n### Response:\n"
+
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": instruction}], tokenize=False, add_generation_prompt=True,
+        enable_thinking=reasoning,   # Qwen3 switch; ignored by other templates
+    )
+    if not reasoning and "</think>" not in prompt[-64:]:
+        # Template has no thinking switch (R1-Distill): close the think block ourselves.
+        prompt += "\n</think>\n\n" if prompt.rstrip().endswith("<think>") else "<think>\n\n</think>\n\n"
+    return prompt
+
+
 # ─── Hugging Face (in-process) ────────────────────────────────────────────────
 
 class HFLLM:
@@ -76,17 +97,7 @@ class HFLLM:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
     def build_prompt(self, instruction: str) -> str:
-        if self.prompt_style == "alpaca":
-            return f"### Instruction:\n{instruction}\n\n### Response:\n"
-
-        prompt = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": instruction}], tokenize=False, add_generation_prompt=True,
-            enable_thinking=self.reasoning,   # Qwen3 switch; ignored by other templates
-        )
-        if not self.reasoning and "</think>" not in prompt[-64:]:
-            # Template has no thinking switch (R1-Distill): close the think block ourselves.
-            prompt += "\n</think>\n\n" if prompt.rstrip().endswith("<think>") else "<think>\n\n</think>\n\n"
-        return prompt
+        return render_prompt(self.tokenizer, instruction, self.prompt_style, self.reasoning)
 
     def generate(self, instruction: str, max_new_tokens: int, do_sample: bool = False,
                  temperature: float = 0.3, top_p: float = 0.9, top_k: int = 40) -> str:

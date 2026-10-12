@@ -75,7 +75,7 @@ def parse_args(argv=None):
     p.add_argument("--summarize-only", action="store_true")
     args = p.parse_args(argv)
 
-    args.models = {"base": f"hf:{ft.base_model_name}", "ft": f"hf:{ft.merged_output_dir}"}
+    args.models = {"base": f"hf:{ft.base_model_name}", "ft": f"hf:{ft.merged_dir}"}
     for binding in args.model:
         name, eq, spec = binding.partition("=")
         if not eq or not name or not spec:

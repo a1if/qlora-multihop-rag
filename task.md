@@ -1,6 +1,6 @@
 # Task Tracker: Resume Upgrade
 
-Branch: `eval-hotpotqa` · PR #1 open, CI green · Tests: 66 passing · Lint: clean
+Branch: `eval-hotpotqa` · PR #1 open, CI green · Tests: 76 passing · Lint: clean
 
 Goal: take **one** small open model (Qwen3-1.7B) and improve it step by step for multi-hop QA with RAG and fine-tuning, measuring every step on HotpotQA. No model comparisons, no cloud models. The resume story is the skills: RAG design, fine-tuning (QLoRA/LoRA, retriever tuning), evaluation, and shipping it as a service.
 
@@ -29,7 +29,7 @@ Legend: `[x]` done · `[ ]` todo · `[~]` written but not checked against real m
 | `src/rag_pipeline.py` | [~] | Rewritten: 4 modes (closed / single / iterative / decompose), same passage budget for all, per-thread stage timings; fixed prompt-in-output, L2/cosine mismatch and sampling bugs |
 | `src/app.py` | [~] | Gradio demo on the new pipeline, configured from env vars |
 | `configs/training_config.py` | [x] | `RAGConfig` gains `llm` spec, prompt style, reasoning, generation settings; GPU-specific comments removed |
-| `src/finetune.py` | [ ] | Unchanged; still Alpaca training (see Phase 2) |
+| `src/finetune.py` | [~] | Rewritten for the SFT data: LoRA/QLoRA, answer-only loss, speed settings, merge for serving (not yet run on GPU) |
 | `src/evaluate.py` | [x] | **Deleted**: graded RAG against another model's output, not correct answers |
 
 ### Tests
@@ -43,6 +43,7 @@ Legend: `[x]` done · `[ ]` todo · `[~]` written but not checked against real m
 | `tests/test_api.py` | [x] | Endpoints, validation, request IDs, metrics, 502 on backend failure |
 | `tests/test_llm.py` | [x] | HTTP payloads, API key, spec parsing |
 | `tests/test_eval_harness.py` | [x] | End-to-end benchmark run, resume, reports |
+| `tests/test_finetune.py` | [x] | Config overrides, label masking, prompt parity with inference, end-of-turn token, data cache key |
 | `tests/test_data_sft.py` | [x] | Task mix, gold/citation correctness, abstain support, bridge targets, train/inference prompt parity |
 
 ### Infra / docs
@@ -104,7 +105,8 @@ The ladder
 
 Code needed for the ladder
 - [x] Data builder for the SFT tasks (`src/data_sft.py`): 20k train questions → 29,715 examples (17,847 reader · 2,031 abstain · 9,837 query), 743 val; prompts shared with the pipeline so train = inference text
-- [ ] Rewrite `src/finetune.py`: chat template, loss on answer tokens only, bf16, config per run
+- [x] Rewrite `src/finetune.py`: same chat prompt as inference, loss on answer tokens only, over-length examples dropped (never truncated), tokenized-data cache, JSON/`--set` config per run, adapter + merged model + run_config.json + metrics.json (tokens/s, peak VRAM)
+- [ ] Throughput sweep on the 5070 (after baseline finishes): LoRA vs QLoRA, gradient checkpointing on/off, batch size → pick fastest setting that fits; record speed-up
 - [ ] Retriever fine-tuning script (`src/finetune_retriever.py`)
 - [ ] BM25 + reranker in `src/retriever.py`
 - [ ] Harness: select retriever variant per stage (`--retriever dense|hybrid|tuned`)

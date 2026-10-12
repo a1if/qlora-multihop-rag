@@ -1,63 +1,81 @@
 """
 configs/training_config.py
-Centralised hyperparameters for QLoRA fine-tuning.
-Modify here rather than in training code.
+Centralised configuration for fine-tuning and the RAG pipeline.
+Override per run with a JSON file or --set key=value (see src/finetune.py).
 """
+import os
 from dataclasses import dataclass, field
 
 
 
 @dataclass
 class FinetuneConfig:
+    # ── Run ──────────────────────────────────────────────────────────────────
+    run_name: str = "sft"
+    output_root: str = field(default_factory=lambda: os.environ.get("QMR_RUNS_DIR", "runs"))
+    seed: int = 0
+
     # ── Model ────────────────────────────────────────────────────────────────
     base_model_name: str = "Qwen/Qwen3-1.7B"
-    merged_output_dir: str = "./new_merged_model_fp32"
-    adapter_output_dir: str = "./new_adapter"
+    method: str = "lora"                           # lora (bf16 base, fastest) | qlora (4-bit base, least memory)
+    attn_implementation: str = "sdpa"              # sdpa | flash_attention_2 (if installed) | eager
 
-    # ── Dataset ──────────────────────────────────────────────────────────────
-    dataset_name: str = "yahma/alpaca-cleaned"
-    num_train_samples: int = 2000
-    max_seq_length: int = 512
-
-    # ── Quantisation ─────────────────────────────────────────────────────────
-    use_4bit: bool = True
-    bnb_4bit_quant_type: str = "nf4"             # nf4 | fp4
-    bnb_4bit_compute_dtype: str = "bfloat16"     # float16 | bfloat16
-    use_double_quant: bool = False
+    # ── Data (built by src/data_sft.py) ──────────────────────────────────────
+    train_file: str = "data/sft/train.jsonl"
+    val_file: str = "data/sft/val.jsonl"
+    max_train_examples: int = 0                    # 0 = all; set for data-scaling runs
+    tasks: list[str] = field(default_factory=lambda: ["reader", "abstain", "query"])
+    max_seq_length: int = 1024                     # longer examples are dropped, never truncated
+    max_val_examples: int = 300
 
     # ── LoRA ─────────────────────────────────────────────────────────────────
-    lora_r: int = 128
+    lora_r: int = 32
     lora_alpha: int = 64
     lora_dropout: float = 0.05
-    lora_bias: str = "none"
     lora_target_modules: list[str] = field(default_factory=lambda: [
         "q_proj", "k_proj", "v_proj", "o_proj",
         "gate_proj", "up_proj", "down_proj"
     ])
 
-    # ── Training ─────────────────────────────────────────────────────────────
-    num_train_epochs: int = 1
-    per_device_train_batch_size: int = 2
-    gradient_accumulation_steps: int = 4          # effective batch = 8
+    # ── Optimisation ─────────────────────────────────────────────────────────
+    num_train_epochs: float = 1.0
+    max_steps: int = -1                            # > 0 overrides epochs (throughput tests)
+    per_device_train_batch_size: int = 8
+    gradient_accumulation_steps: int = 2           # effective batch = 16
     learning_rate: float = 2e-4
-    weight_decay: float = 0.01
-    warmup_ratio: float = 0.1
-    lr_scheduler_type: str = "linear"
-    optim: str = "paged_adamw_32bit"
+    weight_decay: float = 0.0
+    warmup_ratio: float = 0.03
+    lr_scheduler_type: str = "cosine"
     max_grad_norm: float = 1.0
-    fp16: bool = False
     bf16: bool = True                              # Ampere+ (RTX 30xx and newer); else fp16
-    gradient_checkpointing: bool = True
-    group_by_length: bool = True
 
-    # ── Logging ──────────────────────────────────────────────────────────────
-    logging_steps: int = 25
-    save_steps: int = 50
-    report_to: str = "none"                        # "wandb" | "tensorboard" | "none"
-    output_dir: str = "./results"
+    # ── Speed ────────────────────────────────────────────────────────────────
+    gradient_checkpointing: bool = True            # off = faster, more memory
+    group_by_length: bool = True                   # batch similar lengths, less padding
+    optim: str = "adamw_torch_fused"               # fused AdamW kernel
+    use_liger_kernel: bool = False                 # fused RMSNorm/SwiGLU/cross-entropy (needs liger-kernel + triton)
+    allow_tf32: bool = True
+    dataloader_num_workers: int = 0                # >0 is slow to start on Windows (spawn)
 
-    # ── Memory ───────────────────────────────────────────────────────────────
-    max_memory_gb: int = 14                        # per-GPU cap passed to from_pretrained
+    # ── Logging / Saving ─────────────────────────────────────────────────────
+    logging_steps: int = 10
+    eval_steps: int = 200
+    save_steps: int = 500
+    save_total_limit: int = 2
+    report_to: str = "none"                        # none | tensorboard | wandb
+    merge_after_training: bool = True
+
+    @property
+    def run_dir(self) -> str:
+        return os.path.join(self.output_root, self.run_name)
+
+    @property
+    def adapter_dir(self) -> str:
+        return os.path.join(self.run_dir, "adapter")
+
+    @property
+    def merged_dir(self) -> str:
+        return os.path.join(self.run_dir, "merged")
 
 
 @dataclass
