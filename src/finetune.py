@@ -196,6 +196,57 @@ def merge_adapter(config: FinetuneConfig, tokenizer):
     torch.cuda.empty_cache()
 
 
+# ─── Answer-span Loss ─────────────────────────────────────────────────────────
+
+def answer_span_loss(model, inputs: dict, num_items_in_batch=None):
+    """
+    Causal-LM loss that runs the LM head only over the supervised (answer) span.
+
+    Logits over a 152k-token vocabulary for every position dominate memory
+    (8 x 1024 x 152k fp32 ≈ 5 GB), yet only the ~10-30 answer tokens per
+    example carry loss. Positions are kept as one contiguous slice covering the
+    answer tokens of every row in the batch, passed as `logits_to_keep`. The
+    loss value is identical to the full computation.
+
+    Returns (summed-loss / denominator, outputs, number of supervised tokens).
+    """
+    import torch
+    import torch.nn.functional as F
+
+    labels = inputs["labels"]
+    # logits at position t predict the token at t + 1
+    supervised = (labels[:, 1:] != IGNORE_INDEX).any(dim=0).nonzero().squeeze(-1)
+    start, end = int(supervised.min()), int(supervised.max()) + 1
+    keep = torch.arange(start, end, device=labels.device)
+
+    model_inputs = {k: v for k, v in inputs.items() if k not in ("labels", "length")}
+    outputs = model(**model_inputs, logits_to_keep=keep)
+    logits = outputs.logits.float()
+    targets = labels[:, start + 1:end + 1]
+    loss_sum = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1),
+                               ignore_index=IGNORE_INDEX, reduction="sum")
+    n_tokens = (targets != IGNORE_INDEX).sum()
+    denominator = num_items_in_batch if num_items_in_batch is not None else n_tokens
+    return loss_sum / denominator, outputs, n_tokens
+
+
+def make_trainer_class():
+    from transformers import Trainer
+
+    class AnswerSpanTrainer(Trainer):
+        # The loss below is normalised by the token count of the whole accumulated
+        # batch (num_items_in_batch), so Trainer must not divide it again.
+        loss_is_scaled_for_ga = True
+
+        def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+            loss, outputs, _ = answer_span_loss(model, inputs, num_items_in_batch)
+            if num_items_in_batch is None and model.training:
+                loss = loss / self.current_gradient_accumulation_steps
+            return (loss, outputs) if return_outputs else loss
+
+    return AnswerSpanTrainer
+
+
 # ─── Training ─────────────────────────────────────────────────────────────────
 
 def _git_commit() -> str | None:
@@ -220,7 +271,7 @@ def build_trainer(config: FinetuneConfig, model, tokenizer, train_ds, val_ds):
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=config.learning_rate,
         weight_decay=config.weight_decay,
-        warmup_ratio=config.warmup_ratio,
+        warmup_steps=config.warmup_ratio,          # transformers 5: a float in [0, 1) is a ratio
         lr_scheduler_type=config.lr_scheduler_type,
         max_grad_norm=config.max_grad_norm,
         optim=config.optim,
@@ -239,11 +290,17 @@ def build_trainer(config: FinetuneConfig, model, tokenizer, train_ds, val_ds):
         logging_steps=config.logging_steps,
         report_to=config.report_to,
         include_num_input_tokens_seen="non_padding",
-        remove_unused_columns=False,
+        remove_unused_columns=False,                # keep "length" for the length-grouped sampler
+        prediction_loss_only=True,                  # never gather full-vocabulary logits in eval
     )
-    collator = DataCollatorForSeq2Seq(tokenizer, padding=True, pad_to_multiple_of=8,
-                                      label_pad_token_id=IGNORE_INDEX)
-    return Trainer(model=model, args=args, train_dataset=train_ds, eval_dataset=val_ds, data_collator=collator)
+    pad = DataCollatorForSeq2Seq(tokenizer, padding=True, pad_to_multiple_of=8, label_pad_token_id=IGNORE_INDEX)
+
+    def collator(features):
+        # "length" is only for the sampler; the model must not receive it
+        return pad([{k: v for k, v in f.items() if k != "length"} for f in features])
+
+    trainer_cls = make_trainer_class() if config.answer_span_logits else Trainer
+    return trainer_cls(model=model, args=args, train_dataset=train_ds, eval_dataset=val_ds, data_collator=collator)
 
 
 def run_finetuning(config: FinetuneConfig) -> dict:

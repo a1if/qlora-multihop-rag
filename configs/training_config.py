@@ -53,7 +53,8 @@ class FinetuneConfig:
     gradient_checkpointing: bool = True            # off = faster, more memory
     group_by_length: bool = True                   # batch similar lengths, less padding
     optim: str = "adamw_torch_fused"               # fused AdamW kernel
-    use_liger_kernel: bool = False                 # fused RMSNorm/SwiGLU/cross-entropy (needs liger-kernel + triton)
+    answer_span_logits: bool = True                # LM head only over answer tokens (big memory + speed win)
+    use_liger_kernel: bool = False                # fused RMSNorm/SwiGLU/cross-entropy (needs liger-kernel + triton)
     allow_tf32: bool = True
     dataloader_num_workers: int = 0                # >0 is slow to start on Windows (spawn)
 
