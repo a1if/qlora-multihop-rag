@@ -102,3 +102,14 @@ def test_malformed_rows_skipped():
     bad = make_row()
     bad["supporting_facts"] = {"title": ["Glenn Quagmire"], "sent_id": [0]}
     assert build_examples([bad], k=5, max_chars=700, abstain_ratio=0, query_ratio=1) == []
+
+
+def test_retriever_triplets_use_gold_and_hard_negatives():
+    from src.finetune_retriever import build_triplets
+
+    triplets = build_triplets(ROWS[:50], seed=0)
+    assert len(triplets) == 100                       # one per gold passage
+    for t in triplets:
+        assert t["anchor"] == ROWS[0]["question"]
+        assert t["positive"].split(":")[0] in GOLD    # "title: text", like the index
+        assert t["negative"].split(":")[0] not in GOLD

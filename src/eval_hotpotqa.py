@@ -72,6 +72,8 @@ def parse_args(argv=None):
     p.add_argument("--out", default="results/hotpotqa")
     p.add_argument("--top-k", type=int, default=rag.top_k)
     p.add_argument("--hops", type=int, default=rag.num_hops)
+    p.add_argument("--retriever", choices=["dense", "hybrid", "hybrid_rerank"], default=rag.retriever)
+    p.add_argument("--embedding-model", default=rag.embedding_model, help="sentence-transformers model or path")
     p.add_argument("--prompt-style", choices=["chat", "alpaca"], default=rag.prompt_style)
     p.add_argument("--reasoning", action="store_true", help="allow <think> reasoning (much slower)")
     p.add_argument("--load-in-4bit", action="store_true", help="hf backend only")
@@ -99,6 +101,10 @@ def split_system(system: str) -> tuple[str, str]:
 def preds_path(args, system: str) -> str:
     """Predictions are keyed by every setting that changes them, so runs never mix."""
     tag = f"n{args.n}_seed{args.seed}_k{args.top_k}_h{args.hops}_{args.prompt_style}"
+    if args.retriever != "dense":
+        tag += f"_{args.retriever}"
+    if args.embedding_model != RAGConfig().embedding_model:
+        tag += "_emb-" + os.path.basename(os.path.normpath(args.embedding_model))
     tag += "_think" if args.reasoning else ""
     tag += "_4bit" if args.load_in_4bit else ""
     return os.path.join(args.out, "preds", tag, system.replace(":", "__") + ".jsonl")
@@ -115,16 +121,19 @@ def load_preds(path: str) -> dict:
 
 def build_retriever(docs, config, out_dir, n, seed):
     from sentence_transformers import SentenceTransformer
-    from src.retriever import DenseRetriever
+    from src.retriever import DenseRetriever, make_retriever
 
     embedder = SentenceTransformer(config.embedding_model)
     index_dir = os.path.join(out_dir, f"index_n{n}_seed{seed}")
+    if config.embedding_model != RAGConfig().embedding_model:
+        index_dir += "_emb-" + os.path.basename(os.path.normpath(config.embedding_model))
     if DenseRetriever.exists(index_dir):
-        return DenseRetriever.load(index_dir, embedder)
-    print(f"Embedding {len(docs)} HotpotQA paragraphs...")
-    retriever = DenseRetriever.build(docs, embedder)
-    retriever.save(index_dir)
-    return retriever
+        dense = DenseRetriever.load(index_dir, embedder)
+    else:
+        print(f"Embedding {len(docs)} HotpotQA paragraphs...")
+        dense = DenseRetriever.build(docs, embedder)
+        dense.save(index_dir)
+    return make_retriever(config.retriever, dense, config.rerank_model, config.retrieval_candidates)
 
 
 def prediction_record(ex, result) -> dict:
@@ -267,7 +276,8 @@ def write_summary(args, rows, n):
 
     lines = [
         f"HotpotQA distractor dev · n={n} · seed={args.seed} · k={args.top_k} · hops={args.hops} · "
-        f"prompt={args.prompt_style} · reasoning={args.reasoning}",
+        f"prompt={args.prompt_style} · reasoning={args.reasoning} · retriever={args.retriever} · "
+        f"embedder={args.embedding_model}",
         "",
         f"| System | EM | F1 (95% CI) | EM bridge | EM comp. | Support R@{args.top_k} | All-support@{args.top_k} "
         f"| ΔF1 vs {args.reference} (95% CI) | Throughput (q/s) | p50 / p95 latency under load (s) | LLM calls | LLM share |",
@@ -296,7 +306,8 @@ def write_summary(args, rows, n):
 def main(argv=None, examples=None, docs=None):
     args = parse_args(argv)
     config = RAGConfig(top_k=args.top_k, num_hops=args.hops, prompt_style=args.prompt_style,
-                       reasoning=args.reasoning, load_in_4bit=args.load_in_4bit)
+                       reasoning=args.reasoning, load_in_4bit=args.load_in_4bit, retriever=args.retriever,
+                       embedding_model=args.embedding_model)
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "config.json"), "w") as f:
         run_config = {k: v for k, v in vars(args).items() if k != "model"}

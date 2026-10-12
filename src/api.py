@@ -45,6 +45,8 @@ def config_from_env() -> RAGConfig:
         reasoning=os.environ.get("QMR_REASONING", "false").lower() == "true",
         top_k=int(os.environ.get("QMR_TOP_K", defaults.top_k)),
         num_hops=int(os.environ.get("QMR_HOPS", defaults.num_hops)),
+        retriever=os.environ.get("QMR_RETRIEVER", defaults.retriever),
+        embedding_model=os.environ.get("QMR_EMBEDDING_MODEL", defaults.embedding_model),
     )
 
 

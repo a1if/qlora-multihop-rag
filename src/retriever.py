@@ -1,7 +1,8 @@
 """
 src/retriever.py
-Dense passage retrieval with FAISS (cosine similarity via inner product
-over L2-normalised embeddings).
+Passage retrieval: dense FAISS search (cosine similarity via inner product
+over L2-normalised embeddings), BM25, and a hybrid of both with optional
+cross-encoder reranking.
 
 Documents are dicts with at least a "text" key and optionally "title".
 """
@@ -104,3 +105,104 @@ class DenseRetriever:
             for s, i in zip(scores[0], indices[0], strict=True)
             if i != -1
         ]
+
+
+# ─── Sparse Retrieval (BM25) ──────────────────────────────────────────────────
+
+_STOPWORDS = frozenset(
+    "a an and are as at be by for from has he in is it its of on that the to was were what which who whom "
+    "whose when where why how did does do with this these those or not".split()
+)
+
+
+def tokenize(text: str) -> list[str]:
+    import re
+
+    return [t for t in re.findall(r"[a-z0-9]+", text.lower()) if t not in _STOPWORDS]
+
+
+class BM25Retriever:
+    """Okapi BM25 over doc_text (title + paragraph) with an inverted index."""
+
+    def __init__(self, docs: list[dict], k1: float = 1.2, b: float = 0.75):
+        from collections import Counter, defaultdict
+
+        self.docs = docs
+        self.k1, self.b = k1, b
+        self.postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        lengths = np.zeros(len(docs), dtype="float32")
+        for i, doc in enumerate(docs):
+            tokens = tokenize(doc_text(doc))
+            lengths[i] = len(tokens)
+            for term, tf in Counter(tokens).items():
+                self.postings[term].append((i, tf))
+        self.norm = k1 * (1 - b + b * lengths / max(lengths.mean(), 1.0))
+        n = len(docs)
+        self.idf = {t: float(np.log(1 + (n - len(p) + 0.5) / (len(p) + 0.5))) for t, p in self.postings.items()}
+
+    def scores(self, query: str) -> np.ndarray:
+        scores = np.zeros(len(self.docs), dtype="float32")
+        for term in set(tokenize(query)):
+            for i, tf in self.postings.get(term, ()):
+                scores[i] += self.idf[term] * tf * (self.k1 + 1) / (tf + self.norm[i])
+        return scores
+
+    def search(self, query: str, k: int) -> list[dict]:
+        scores = self.scores(query)
+        top = np.argsort(-scores)[:k]
+        return [{**self.docs[i], "score": float(scores[i])} for i in top if scores[i] > 0]
+
+
+# ─── Hybrid Retrieval ─────────────────────────────────────────────────────────
+
+def reciprocal_rank_fusion(ranked_lists: list[list[dict]], k: int, c: int = 60) -> list[dict]:
+    """Fuse rankings by summing 1 / (c + rank); robust to incomparable score scales."""
+    fused, docs = {}, {}
+    for ranked in ranked_lists:
+        for rank, doc in enumerate(ranked):
+            key = doc.get("id", doc_text(doc))
+            fused[key] = fused.get(key, 0.0) + 1.0 / (c + rank + 1)
+            docs.setdefault(key, doc)
+    order = sorted(fused, key=fused.get, reverse=True)[:k]
+    return [{**docs[key], "score": fused[key]} for key in order]
+
+
+class HybridRetriever:
+    """
+    Dense + BM25 candidates fused with reciprocal rank fusion, optionally
+    re-scored by a cross-encoder that reads query and passage together.
+
+    Same search(query, k) interface as DenseRetriever, so the pipeline is unchanged.
+    """
+
+    def __init__(self, dense: DenseRetriever, bm25: BM25Retriever | None = None, reranker=None,
+                 candidates: int = 20):
+        self.dense = dense
+        self.docs = dense.docs
+        self.bm25 = bm25 or BM25Retriever(dense.docs)
+        self.reranker = reranker
+        self.candidates = candidates
+        self._lock = threading.Lock()
+
+    def search(self, query: str, k: int) -> list[dict]:
+        n = max(self.candidates, k)
+        pool = reciprocal_rank_fusion([self.dense.search(query, n), self.bm25.search(query, n)], n)
+        if self.reranker is None:
+            return pool[:k]
+        with self._lock:
+            scores = self.reranker.predict([(query, doc_text(d)) for d in pool])
+        ranked = sorted(zip(scores, range(len(pool)), pool, strict=True), key=lambda x: -x[0])[:k]
+        return [{**doc, "score": float(score)} for score, _, doc in ranked]
+
+
+def make_retriever(kind: str, dense: DenseRetriever, rerank_model: str = None, candidates: int = 20):
+    """kind: dense | hybrid | hybrid_rerank"""
+    if kind == "dense":
+        return dense
+    if kind == "hybrid":
+        return HybridRetriever(dense, candidates=candidates)
+    if kind == "hybrid_rerank":
+        from sentence_transformers import CrossEncoder
+
+        return HybridRetriever(dense, reranker=CrossEncoder(rerank_model), candidates=candidates)
+    raise ValueError(f"Unknown retriever {kind!r}; expected dense | hybrid | hybrid_rerank")

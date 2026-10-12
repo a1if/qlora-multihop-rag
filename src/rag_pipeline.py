@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, field
 
 from src.llm import LLM, make_llm
-from src.retriever import DenseRetriever, doc_text, merge_round_robin
+from src.retriever import DenseRetriever, doc_text, make_retriever, merge_round_robin
 from src.text_utils import extract_answer, extract_query, parse_subquestions, strip_reasoning
 
 MODES = ("closed", "single", "iterative", "decompose")
@@ -135,7 +135,8 @@ class RAGPipeline:
         from sentence_transformers import SentenceTransformer
 
         embedder = SentenceTransformer(config.embedding_model)
-        retriever = DenseRetriever.load(index_dir or config.index_dir, embedder)
+        dense = DenseRetriever.load(index_dir or config.index_dir, embedder)
+        retriever = make_retriever(config.retriever, dense, config.rerank_model, config.retrieval_candidates)
         llm = make_llm(llm_spec or config.llm, config.prompt_style, config.reasoning, config.load_in_4bit,
                        config.hf_max_batch_size)
         return cls(llm, retriever, config)

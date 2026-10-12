@@ -90,6 +90,9 @@ class RAGConfig:
     embedding_model: str = "all-MiniLM-L6-v2"
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
+    retriever: str = "dense"                       # dense | hybrid (dense + BM25, RRF) | hybrid_rerank
+    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L6-v2"
+    retrieval_candidates: int = 20                 # per retriever, before fusion / reranking
     top_k: int = 5                                 # passages given to the reader (all modes)
     num_hops: int = 2
     max_passage_chars: int = 700
