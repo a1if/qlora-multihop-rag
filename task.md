@@ -1,6 +1,6 @@
 # Task Tracker: Resume Upgrade
 
-Branch: `eval-hotpotqa` · PR #1 open, CI green · Tests: 57 passing · Lint: clean
+Branch: `eval-hotpotqa` · PR #1 open, CI green · Tests: 66 passing · Lint: clean
 
 Goal: take **one** small open model (Qwen3-1.7B) and improve it step by step for multi-hop QA with RAG and fine-tuning, measuring every step on HotpotQA. No model comparisons, no cloud models. The resume story is the skills: RAG design, fine-tuning (QLoRA/LoRA, retriever tuning), evaluation, and shipping it as a service.
 
@@ -21,6 +21,7 @@ Legend: `[x]` done · `[ ]` todo · `[~]` written but not checked against real m
 | `src/eval_hotpotqa.py` | [~] | Ablation benchmark CLI: model specs, concurrent workers, resumable JSONL, summary.md/csv |
 | `src/api.py` | [~] | FastAPI service: `/v1/answer`, `/healthz`, `/readyz`, `/metrics`, request IDs, JSON logs |
 | `src/build_index.py` | [~] | Index build CLI (arXiv or HotpotQA) |
+| `src/data_sft.py` | [x] | SFT data from HotpotQA train: reader (gold + hard distractors → answer + citations), abstain, hop-2 query writer |
 
 ### Source: modified
 | File | Status | Change |
@@ -42,6 +43,7 @@ Legend: `[x]` done · `[ ]` todo · `[~]` written but not checked against real m
 | `tests/test_api.py` | [x] | Endpoints, validation, request IDs, metrics, 502 on backend failure |
 | `tests/test_llm.py` | [x] | HTTP payloads, API key, spec parsing |
 | `tests/test_eval_harness.py` | [x] | End-to-end benchmark run, resume, reports |
+| `tests/test_data_sft.py` | [x] | Task mix, gold/citation correctness, abstain support, bridge targets, train/inference prompt parity |
 
 ### Infra / docs
 | File | Status | Purpose |
@@ -101,7 +103,7 @@ The ladder
 - [ ] Stage 6 (optional): + DPO on grounded vs unsupported answers sampled from the Stage 5 model
 
 Code needed for the ladder
-- [ ] Data builder for the SFT tasks (`src/data_sft.py`)
+- [x] Data builder for the SFT tasks (`src/data_sft.py`): 20k train questions → 29,715 examples (17,847 reader · 2,031 abstain · 9,837 query), 743 val; prompts shared with the pipeline so train = inference text
 - [ ] Rewrite `src/finetune.py`: chat template, loss on answer tokens only, bf16, config per run
 - [ ] Retriever fine-tuning script (`src/finetune_retriever.py`)
 - [ ] BM25 + reranker in `src/retriever.py`

@@ -68,8 +68,27 @@ DECOMPOSE_PROMPT = (
 )
 
 
+FOLLOWUP_CONTEXT = 3   # passages shown to the follow-up query writer
+
+
 def format_passages(passages: list[dict], max_chars: int) -> str:
     return "\n".join(f"[{i}] {doc_text(p)[:max_chars]}" for i, p in enumerate(passages, 1))
+
+
+# Prompt builders are shared with src/data_sft.py, so fine-tuning data uses
+# exactly the text the model sees at inference time.
+
+def reader_prompt(question: str, passages: list[dict], max_chars: int, short: bool = True) -> str:
+    rule = SHORT_ANSWER_RULE if short else LONG_ANSWER_RULE
+    if not passages:
+        return CLOSED_PROMPT.format(rule=rule, question=question)
+    return READER_PROMPT.format(rule=rule, question=question, passages=format_passages(passages, max_chars))
+
+
+def followup_prompt(question: str, passages: list[dict], max_chars: int) -> str:
+    return FOLLOWUP_PROMPT.format(
+        question=question, passages=format_passages(passages[:FOLLOWUP_CONTEXT], max_chars)
+    )
 
 
 # ─── RAG Pipeline ─────────────────────────────────────────────────────────────
@@ -105,6 +124,12 @@ class RAGPipeline:
         # per-thread stage timings, so concurrent answer() calls don't mix
         self._local = threading.local()
 
+    def _timer(self) -> "_StageTimer":
+        """This thread's timer; created on first use if answer() didn't start one."""
+        if not hasattr(self._local, "timer"):
+            self._local.timer = _StageTimer()
+        return self._local.timer
+
     @classmethod
     def from_config(cls, config, llm_spec: str = None, index_dir: str = None) -> "RAGPipeline":
         from sentence_transformers import SentenceTransformer
@@ -127,32 +152,23 @@ class RAGPipeline:
                 temperature=c.temperature, top_p=c.top_p, top_k=c.top_k_sampling,
             )
         finally:
-            self._local.timer.add("llm", time.perf_counter() - start)
+            self._timer().add("llm", time.perf_counter() - start)
 
     def _search(self, query: str, k: int) -> list[dict]:
         start = time.perf_counter()
         try:
             return self.retriever.search(query, k)
         finally:
-            self._local.timer.add("retrieval", time.perf_counter() - start)
+            self._timer().add("retrieval", time.perf_counter() - start)
 
     def _read(self, question: str, passages: list[dict], short: bool) -> tuple[str, str]:
-        rule = SHORT_ANSWER_RULE if short else LONG_ANSWER_RULE
-        if passages:
-            prompt = READER_PROMPT.format(
-                rule=rule, question=question,
-                passages=format_passages(passages, self.config.max_passage_chars),
-            )
-        else:
-            prompt = CLOSED_PROMPT.format(rule=rule, question=question)
+        prompt = reader_prompt(question, passages, self.config.max_passage_chars, short)
         max_tokens = self.config.max_new_tokens if short else self.config.max_new_tokens_long
         raw = self._llm(prompt, max_tokens)
         return (extract_answer(raw) if short else strip_reasoning(raw)), raw
 
     def _followup_query(self, question: str, passages: list[dict]) -> str:
-        prompt = FOLLOWUP_PROMPT.format(
-            question=question, passages=format_passages(passages[:3], self.config.max_passage_chars)
-        )
+        prompt = followup_prompt(question, passages, self.config.max_passage_chars)
         return extract_query(self._llm(prompt, 32)) or question
 
     def _decompose(self, question: str, n: int) -> list[str]:

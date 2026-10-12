@@ -60,3 +60,26 @@ def parse_subquestions(text: str, max_n: int) -> list[str]:
             lines.append(line)
     questions = [line for line in lines if line.endswith("?")]
     return (questions or lines)[:max_n]
+
+
+# ─── Fine-tuned Output Conventions ────────────────────────────────────────────
+
+ABSTAIN = "insufficient evidence"
+_SOURCES_LINE = re.compile(r"sources\s*:\s*(.+)", re.I)
+
+
+def format_target(answer: str, sources: list[int]) -> str:
+    """Reader training target: the answer line the pipeline parses, plus citations."""
+    if not sources:
+        return f"Answer: {answer}"
+    return f"Answer: {answer}\nSources: " + " ".join(f"[{i}]" for i in sources)
+
+
+def parse_sources(text: str) -> list[int]:
+    """Passage numbers cited on a 'Sources: [2] [4]' line (empty if none)."""
+    matches = _SOURCES_LINE.findall(strip_reasoning(text))
+    return [int(n) for n in re.findall(r"\[(\d+)\]", matches[-1])] if matches else []
+
+
+def is_abstention(answer: str) -> bool:
+    return answer.strip().lower().rstrip(".") == ABSTAIN
