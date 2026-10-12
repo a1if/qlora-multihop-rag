@@ -102,6 +102,7 @@ class RAGConfig:
     reasoning: bool = False                        # let the model emit <think> before answering
     reasoning_token_budget: int = 512              # extra tokens when reasoning=True
     load_in_4bit: bool = False                     # hf backend only
+    hf_max_batch_size: int = 16                    # hf backend: dynamic batching of concurrent calls
     max_new_tokens: int = 48                       # short answers (benchmarks)
     max_new_tokens_long: int = 256                 # free-form answers (demo)
     do_sample: bool = False                        # greedy decoding for reproducible evals

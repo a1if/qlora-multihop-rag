@@ -23,14 +23,14 @@ Usage:
     # smoke test against a local Ollama model
     python -m src.eval_hotpotqa --n 20 \\
         --model base=openai:qwen3:1.7b@http://localhost:11434/v1 \\
-        --systems base:closed base:single --workers 4
+        --systems base:closed base:single
 
     # full ablation: base model vs the QLoRA fine-tune, both served by vLLM
     python -m src.eval_hotpotqa --n 500 \\
         --model base=openai:base@http://localhost:8000/v1 \\
         --model ft=openai:ft@http://localhost:8001/v1 \\
         --systems base:closed base:single base:iterative base:decompose \\
-                  ft:closed ft:single ft:iterative --workers 8
+                  ft:closed ft:single ft:iterative
 
     # re-print the table from saved predictions
     python -m src.eval_hotpotqa --n 500 --systems ... --summarize-only
@@ -65,7 +65,8 @@ def parse_args(argv=None):
                    help="bind a model name to an LLM spec (repeatable)")
     p.add_argument("--systems", nargs="+", default=["base:closed", "base:single", "base:iterative", "base:decompose"])
     p.add_argument("--reference", default="base:single", help="system to compute F1 deltas against")
-    p.add_argument("--workers", type=int, default=1, help="concurrent questions (HTTP backends only)")
+    p.add_argument("--workers", type=int, default=16,
+                   help="concurrent questions; for hf: models this is also the dynamic batch size")
     p.add_argument("--out", default="results/hotpotqa")
     p.add_argument("--top-k", type=int, default=rag.top_k)
     p.add_argument("--hops", type=int, default=rag.num_hops)
@@ -169,10 +170,10 @@ def run_systems(args, config, examples, docs):
             continue
 
         spec = args.models[model_name]
-        # an in-process transformers model is not safe to call from several threads
-        workers = 1 if spec.startswith("hf:") else args.workers
+        workers = args.workers
         print(f"\nModel {model_name!r} -> {spec} (workers={workers})")
-        llm = make_llm(spec, config.prompt_style, config.reasoning, config.load_in_4bit)
+        # hf: concurrent calls from the worker threads are batched on the GPU
+        llm = make_llm(spec, config.prompt_style, config.reasoning, config.load_in_4bit, max_batch_size=workers)
         pipeline = RAGPipeline(llm, retriever, config)
         try:
             for system in systems:

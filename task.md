@@ -1,10 +1,37 @@
 # Task Tracker: Resume Upgrade
 
-Branch: `eval-hotpotqa` · PR #1 open, CI green · Tests: 76 passing · Lint: clean
+Branch: `eval-hotpotqa` · PR #1 open, CI green · Tests: 81 passing · Lint: clean
 
 Goal: take **one** small open model (Qwen3-1.7B) and improve it step by step for multi-hop QA with RAG and fine-tuning, measuring every step on HotpotQA. No model comparisons, no cloud models. The resume story is the skills: RAG design, fine-tuning (QLoRA/LoRA, retriever tuning), evaluation, and shipping it as a service.
 
 Legend: `[x]` done · `[ ]` todo · `[~]` written but not checked against real models/data
+
+---
+
+## Resume here (paused 2026-10-12)
+
+Baseline results so far (Qwen3-1.7B, HotpotQA dev n=500, k=5):
+
+| Stage | EM | F1 (95% CI) | Support R@5 | All-support@5 | p50 latency |
+|---|---|---|---|---|---|
+| 0 closed-book | 10.4 | 13.9 [11.2, 16.8] | – | – | 0.38 s |
+| 1 single-hop RAG | 34.0 | 43.2 [39.1, 47.4] | 75.3 | 54.4 | 0.47 s |
+| 2 iterative multi-hop | 37.2 | 47.8 [43.6, 52.0] | 77.8 | 59.8 | 1.28 s |
+
+Next steps, in order:
+1. Finish the baseline (decompose resumes from 231/500; now batched, so much faster):
+   `python -m src.eval_hotpotqa --n 500 --systems base:closed base:single base:iterative base:decompose --reference base:single --out results/baseline`
+2. Batching check: rerun `base:single base:iterative` with `--out results/batched`; compare wall time and answers with `results/baseline`
+3. Training throughput sweep: `python -m src.finetune --set max_steps=40 --set merge_after_training=false --set run_name=speed_<variant> ...` over lora/qlora × gradient checkpointing on/off × batch size
+4. First full SFT run, then benchmark `ft:single ft:iterative`
+
+Environment (every new shell):
+```powershell
+$env:HF_HOME = "D:\qmr\hf-cache"; $env:HF_HUB_DISABLE_SYMLINKS_WARNING = "1"; $env:QMR_RUNS_DIR = "D:\qmr\runs"
+& D:\qmr\venv\Scripts\Activate.ps1
+cd C:\Users\alift\qlora-multihop-rag
+```
+Local, gitignored artifacts: `results/baseline/` (predictions + summary) and `data/sft/` (29,715 train / 743 val). Regenerate the data with `python -m src.data_sft --n 20000 --out data/sft`.
 
 ---
 
@@ -20,6 +47,7 @@ Legend: `[x]` done · `[ ]` todo · `[~]` written but not checked against real m
 | `src/hotpotqa.py` | [~] | Loads HotpotQA distractor dev set and pools its paragraphs into one corpus (dataset ID and fields not yet checked against the real dataset) |
 | `src/eval_hotpotqa.py` | [~] | Ablation benchmark CLI: model specs, concurrent workers, resumable JSONL, summary.md/csv |
 | `src/api.py` | [~] | FastAPI service: `/v1/answer`, `/healthz`, `/readyz`, `/metrics`, request IDs, JSON logs |
+| `src/batching.py` | [~] | Dynamic batching of concurrent generate() calls (tested with fakes; GPU check pending) |
 | `src/build_index.py` | [~] | Index build CLI (arXiv or HotpotQA) |
 | `src/data_sft.py` | [x] | SFT data from HotpotQA train: reader (gold + hard distractors → answer + citations), abstain, hop-2 query writer |
 
@@ -43,6 +71,7 @@ Legend: `[x]` done · `[ ]` todo · `[~]` written but not checked against real m
 | `tests/test_api.py` | [x] | Endpoints, validation, request IDs, metrics, 502 on backend failure |
 | `tests/test_llm.py` | [x] | HTTP payloads, API key, spec parsing |
 | `tests/test_eval_harness.py` | [x] | End-to-end benchmark run, resume, reports |
+| `tests/test_batching.py` | [x] | Batching, max size, group isolation, error propagation |
 | `tests/test_finetune.py` | [x] | Config overrides, label masking, prompt parity with inference, end-of-turn token, data cache key |
 | `tests/test_data_sft.py` | [x] | Task mix, gold/citation correctness, abstain support, bridge targets, train/inference prompt parity |
 
@@ -88,14 +117,14 @@ Setup
 - [x] Local GPU environment at `D:\qmr` (C: is full): torch 2.11+cu128, transformers 5.19, peft 0.21, trl 1.15, bitsandbytes 0.50 (`scripts/setup_gpu_env.ps1`)
 - [x] Smoke run on the real model (`--n 20`): pipeline works end to end. Fixed `torch_dtype` → `dtype` for transformers 5
   - finding: base model's hop-2 queries changed retrieval on 12/20 questions but found 0 extra gold passages, which motivates Stages 4–5
-- [ ] Full baseline n=500 for Stages 0–2 (running → `results/baseline/summary.md`)
+- [~] Full baseline n=500 for Stages 0–2: closed, single, iterative done; decompose paused at 231/500 (resumes automatically)
 - [ ] Split hygiene: train on HotpotQA *train*, report on a fixed *dev* sample (n=500)
 - [ ] Experiment tracking (W&B or MLflow): config, loss curves, eval per run
 
 The ladder
-- [ ] Stage 0: no retrieval (closed-book baseline)
-- [ ] Stage 1: + RAG, single-hop dense retrieval
-- [ ] Stage 2: + multi-hop retrieval (iterative follow-up search; decompose as a comparison)
+- [x] Stage 0: no retrieval (closed-book baseline): EM 10.4 · F1 13.9
+- [x] Stage 1: + RAG, single-hop dense retrieval: EM 34.0 · F1 43.2 · support R@5 75.3%
+- [~] Stage 2: + multi-hop retrieval: iterative EM 37.2 · F1 47.8 (+4.6 F1 vs single, 95% CI [+1.7, +7.5]) · support R@5 77.8%; decompose pending
 - [ ] Stage 3: + better retrieval: hybrid BM25 + dense, cross-encoder reranker
 - [ ] Stage 4: + fine-tuned retriever (contrastive tuning of the embedder on question → gold passages)
 - [ ] Stage 5: + fine-tuned model, QLoRA SFT, one LoRA adapter trained on two tasks:
@@ -111,6 +140,11 @@ Code needed for the ladder
 - [ ] BM25 + reranker in `src/retriever.py`
 - [ ] Harness: select retriever variant per stage (`--retriever dense|hybrid|tuned`)
 - [ ] Extra metrics: citation precision/recall, hallucination rate on unanswerable variants
+
+Speed
+- [x] Dynamic batching for local-model evaluation and the API (`src/batching.py`, `--workers 16` default)
+- [ ] Verify batching on GPU: wall time vs unbatched baseline, and answer agreement on the same 500 questions
+- [ ] Training throughput sweep (see above)
 
 Understanding why it works (small ablations on Stage 5)
 - [ ] LoRA rank 8 vs 32 vs 128

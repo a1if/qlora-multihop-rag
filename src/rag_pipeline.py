@@ -136,7 +136,8 @@ class RAGPipeline:
 
         embedder = SentenceTransformer(config.embedding_model)
         retriever = DenseRetriever.load(index_dir or config.index_dir, embedder)
-        llm = make_llm(llm_spec or config.llm, config.prompt_style, config.reasoning, config.load_in_4bit)
+        llm = make_llm(llm_spec or config.llm, config.prompt_style, config.reasoning, config.load_in_4bit,
+                       config.hf_max_batch_size)
         return cls(llm, retriever, config)
 
     # ── Instrumented Calls ────────────────────────────────────────────────────

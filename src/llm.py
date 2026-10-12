@@ -65,10 +65,15 @@ class HFLLM:
         False turns off the <think> phase: Qwen3 templates do this via
         `enable_thinking=False`; for templates without that switch (R1-Distill)
         an empty think block is pre-filled. Short answers get ~10x cheaper.
+    max_batch_size:
+        > 1 enables dynamic batching (src/batching.py): concurrent generate()
+        calls from different threads are run as one left-padded GPU batch.
+        Note: batched greedy decoding can differ from unbatched in rare cases
+        because padded matmuls round differently in bf16.
     """
 
     def __init__(self, model_path: str, prompt_style: str = "chat", reasoning: bool = False,
-                 load_in_4bit: bool = False):
+                 load_in_4bit: bool = False, max_batch_size: int = 1, batch_wait_ms: float = 10.0):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
@@ -95,38 +100,66 @@ class HFLLM:
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "left"    # generation continues from the right edge
+        # generation_config may list several stop tokens (Qwen3: <|im_end|> and <|endoftext|>)
+        self.eos_ids = self.model.generation_config.eos_token_id or self.tokenizer.eos_token_id
+
+        self._batcher = None
+        if max_batch_size > 1:
+            from src.batching import DynamicBatcher
+
+            self._batcher = DynamicBatcher(self._generate_batch, max_batch_size, batch_wait_ms)
+
+    @property
+    def batch_sizes(self) -> list[int]:
+        return self._batcher.batch_sizes if self._batcher else []
 
     def build_prompt(self, instruction: str) -> str:
         return render_prompt(self.tokenizer, instruction, self.prompt_style, self.reasoning)
 
     def generate(self, instruction: str, max_new_tokens: int, do_sample: bool = False,
                  temperature: float = 0.3, top_p: float = 0.9, top_k: int = 40) -> str:
+        sampling = (("temperature", temperature), ("top_p", top_p), ("top_k", top_k)) if do_sample else ()
+        payload = (self.build_prompt(instruction), max_new_tokens, sampling)
+        if self._batcher is None:
+            with self._lock:
+                return self._generate_batch([payload])[0]
+        # Only requests with the same decoding settings can share a generate() call.
+        return self._batcher.submit(payload, group=sampling)
+
+    def _generate_batch(self, payloads: list[tuple]) -> list[str]:
         import torch
 
-        prompt = self.build_prompt(instruction)
+        prompts = [p[0] for p in payloads]
+        limits = [p[1] for p in payloads]
+        sampling = dict(payloads[0][2])
         inputs = self.tokenizer(
-            prompt,
+            prompts,
             return_tensors="pt",
+            padding=True,
             # the chat template already contains BOS
             add_special_tokens=self.prompt_style == "alpaca",
         ).to(self.model.device)
 
-        sampling = dict(temperature=temperature, top_p=top_p, top_k=top_k) if do_sample else {}
-        with self._lock, torch.no_grad():
+        with torch.no_grad():
             output = self.model.generate(
                 **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=do_sample,
+                max_new_tokens=max(limits),
+                do_sample=bool(sampling),
                 pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
+                eos_token_id=self.eos_ids,
                 **sampling,
             )
-        new_tokens = output[0, inputs["input_ids"].shape[1]:]
-        return self.tokenizer.decode(new_tokens, skip_special_tokens=True)
+        start = inputs["input_ids"].shape[1]
+        # Each caller gets at most its own max_new_tokens, even if the batch ran longer.
+        return [self.tokenizer.decode(output[i, start:start + limit], skip_special_tokens=True)
+                for i, limit in enumerate(limits)]
 
     def close(self):
         import torch
 
+        if self._batcher is not None:
+            self._batcher.close()
         del self.model
         gc.collect()
         if torch.cuda.is_available():
@@ -179,12 +212,12 @@ class OpenAICompatibleLLM:
 # ─── Factory ──────────────────────────────────────────────────────────────────
 
 def make_llm(spec: str, prompt_style: str = "chat", reasoning: bool = False,
-             load_in_4bit: bool = False) -> LLM:
+             load_in_4bit: bool = False, max_batch_size: int = 1) -> LLM:
     backend, sep, target = spec.partition(":")
     if not sep or not target:
         raise ValueError(f"Bad LLM spec {spec!r}; expected hf:<path> or openai:<model>@<base_url>")
     if backend == "hf":
-        return HFLLM(target, prompt_style, reasoning, load_in_4bit)
+        return HFLLM(target, prompt_style, reasoning, load_in_4bit, max_batch_size)
     if backend == "openai":
         model, at, base_url = target.rpartition("@")
         if not at or not model:

@@ -8,6 +8,7 @@ Documents are dicts with at least a "text" key and optionally "title".
 
 import json
 import os
+import threading
 
 import numpy as np
 
@@ -44,6 +45,7 @@ class DenseRetriever:
         self.docs = docs
         self.index = index
         self.embedder = embedder
+        self._lock = threading.Lock()   # search() is called from many threads under batching
 
     # ── Encoding ──────────────────────────────────────────────────────────────
 
@@ -94,8 +96,9 @@ class DenseRetriever:
     # ── Search ────────────────────────────────────────────────────────────────
 
     def search(self, query: str, k: int) -> list[dict]:
-        query_vec = self._encode(self.embedder, [query])
-        scores, indices = self.index.search(query_vec, k)
+        with self._lock:
+            query_vec = self._encode(self.embedder, [query])
+            scores, indices = self.index.search(query_vec, k)
         return [
             {**self.docs[i], "score": float(s)}
             for s, i in zip(scores[0], indices[0], strict=True)
