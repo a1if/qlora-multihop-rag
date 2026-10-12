@@ -23,7 +23,7 @@ Next steps, in order:
    `python -m src.eval_hotpotqa --n 500 --systems base:closed base:single base:iterative base:decompose --reference base:single --out results/baseline`
 2. Batching check: rerun `base:single base:iterative` with `--out results/batched`; compare wall time and answers with `results/baseline`
 3. ~~Training throughput sweep~~ (done, see Speed): `python -m src.finetune --set max_steps=40 --set merge_after_training=false --set run_name=speed_<variant> ...` over lora/qlora × gradient checkpointing on/off × batch size
-4. First full SFT run, then benchmark `ft:single ft:iterative`
+4. ~~First SFT run~~ (sft_10k done, see Stage 5). Next: full 30k run `python -m src.finetune --set run_name=sft_full` (~1.5 h), then Stages 3–4
 
 Environment (every new shell):
 ```powershell
@@ -127,7 +127,7 @@ The ladder
 - [x] Stage 2: + multi-hop retrieval: iterative EM 37.2 · F1 47.8 (+4.6 F1 vs single, 95% CI [+1.7, +7.5]) · support R@5 77.8%. Decompose: EM 34.6 · F1 43.8 (+0.6, n.s.), so iterative is the multi-hop strategy going forward
 - [ ] Stage 3: + better retrieval: hybrid BM25 + dense, cross-encoder reranker
 - [ ] Stage 4: + fine-tuned retriever (contrastive tuning of the embedder on question → gold passages)
-- [~] Stage 5: + fine-tuned model, LoRA SFT (first run `sft_10k`: 10k examples, ~1 h, running), one LoRA adapter trained on two tasks:
+- [~] Stage 5: + fine-tuned model, LoRA SFT. First run `sft_10k` (10k examples, 34 min, 2,993 tok/s, eval loss 0.234): ft:iterative EM 50.2 · F1 62.1 (+14.3 F1 vs base iterative, CI [+10.1, +18.6]); both-gold retrieval 59.8% → 74.8%; wrong answers when evidence missing 83% → 29%; citation precision 91% / recall 97%. ft:single EM 36.8 · F1 46.7 (abstains 31%, mostly when gold missing). Full 30k run next. one LoRA adapter trained on two tasks:
   - reader: question + gold and distractor passages → short answer with citations, "insufficient evidence" when gold is missing
   - query writer: question + hop-1 passages → hop-2 search query (bridge entity)
 - [ ] Stage 6 (optional): + DPO on grounded vs unsupported answers sampled from the Stage 5 model

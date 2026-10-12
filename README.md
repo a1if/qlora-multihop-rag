@@ -121,7 +121,33 @@ One model, Qwen3-1.7B, improved one technique at a time. Every stage is measured
 | 4 | Retriever fine-tuning | Contrastive tuning of the embedding model on question → supporting passages |
 | 5 | LLM fine-tuning | QLoRA SFT, one adapter for two tasks: grounded reader (citations, abstains when evidence is missing) and hop-2 query writer |
 
-<!-- Results table goes here: EM, F1, support recall@k, latency per stage. -->
+### Results so far
+
+Qwen3-1.7B · 500 HotpotQA dev questions (distractor set, 4,943 pooled paragraphs) · 5 passages per answer · greedy decoding.
+
+| Stage | EM | F1 (95% CI) | Both gold passages retrieved | Wrong answers when evidence missing |
+|---|---|---|---|---|
+| 0 · model alone | 10.4 | 13.9 [11.2, 16.8] | – | – |
+| 1 · + RAG (single search) | 34.0 | 43.2 [39.1, 47.4] | 54.4% | – |
+| 2 · + iterative multi-hop retrieval | 37.2 | 47.8 [43.6, 52.0] | 59.8% | 83% |
+| 5 · + LoRA fine-tune (10k examples), multi-hop | **50.2** | **62.1 [58.2, 66.0]** | **74.8%** | **29%** |
+
+- Fine-tuning adds **+14.3 F1** over the best base pipeline (paired bootstrap 95% CI [+10.1, +18.6]).
+- The fine-tuned hop-2 query writer is the main driver: both supporting passages retrieved 74.8% vs 59.8%.
+- Trained abstention: when retrieval misses evidence, wrong answers drop from 83% to 29%; only 1.4% of questions are refused despite full evidence. Citation precision 91%, recall 97%.
+- Splitting the question up front (decomposition) gave no gain (+0.6 F1, n.s.), so iterative retrieval is the multi-hop strategy.
+
+Stages 3 (hybrid retrieval + reranker) and 4 (retriever fine-tuning) are in progress.
+
+### Training and inference efficiency (RTX 5070, 12 GB)
+
+| | Before | After | |
+|---|---|---|---|
+| Fine-tuning throughput | 857 tok/s | 2,418 tok/s | **2.8×**: LM head computed only over the answer span (`logits_to_keep`), loss/gradients verified identical |
+| Fine-tuning peak memory (batch 4) | 10.8 GB | 4.9 GB | batch 8 went from OOM to 6.0 GB |
+| Evaluation, multi-hop, 500 questions | 11 min 23 s | 3 min 27 s | **3.3×**: dynamic batching of concurrent generate calls, 95% identical answers |
+
+A 10k-example LoRA run takes 34 minutes.
 
 ## Benchmark: HotpotQA
 
