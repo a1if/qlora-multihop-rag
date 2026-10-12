@@ -46,8 +46,9 @@ def render_prompt(tokenizer, instruction: str, prompt_style: str = "chat", reaso
         [{"role": "user", "content": instruction}], tokenize=False, add_generation_prompt=True,
         enable_thinking=reasoning,   # Qwen3 switch; ignored by other templates
     )
-    if not reasoning and "</think>" not in prompt[-64:]:
-        # Template has no thinking switch (R1-Distill): close the think block ourselves.
+    if not reasoning and "</think>" not in prompt[-64:] and "<think>" in tokenizer.get_vocab():
+        # <think>-style model whose template has no thinking switch (R1-Distill):
+        # close the think block ourselves. Models without <think> (e.g. Gemma) are left alone.
         prompt += "\n</think>\n\n" if prompt.rstrip().endswith("<think>") else "<think>\n\n</think>\n\n"
     return prompt
 

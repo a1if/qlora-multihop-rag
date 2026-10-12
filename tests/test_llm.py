@@ -50,3 +50,30 @@ def test_make_llm_parses_ollama_style_model_names():
 def test_make_llm_rejects_bad_specs(spec):
     with pytest.raises(ValueError):
         make_llm(spec)
+
+
+class TemplateTokenizer:
+    """Chat template without a thinking switch; vocab decides whether <think> exists."""
+
+    def __init__(self, has_think_token):
+        self.vocab = {"<think>": 1, "</think>": 2} if has_think_token else {"<|turn>": 1}
+
+    def get_vocab(self):
+        return self.vocab
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True, **kwargs):
+        return f"<user>{messages[0]['content']}<model>\n"
+
+
+def test_render_prompt_closes_think_block_for_r1_style_models():
+    from src.llm import render_prompt
+
+    prompt = render_prompt(TemplateTokenizer(has_think_token=True), "Q?", "chat", reasoning=False)
+    assert prompt.endswith("<think>\n\n</think>\n\n")
+
+
+def test_render_prompt_leaves_models_without_think_token_alone():
+    from src.llm import render_prompt
+
+    prompt = render_prompt(TemplateTokenizer(has_think_token=False), "Q?", "chat", reasoning=False)
+    assert prompt == "<user>Q?<model>\n"
