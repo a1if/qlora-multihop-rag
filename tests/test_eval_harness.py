@@ -49,6 +49,7 @@ def test_harness_scores_and_writes_reports(tmp_path, fake_backend):
     assert rows["base:iterative"]["EM_bridge"] == 1.0
     assert rows["base:iterative"]["dF1_vs_ref"] == pytest.approx(0.5)
     assert rows["base:iterative"]["llm_calls"] == 2.0
+    assert rows["base:iterative"]["throughput_qps"] > 0 and rows["base:iterative"]["workers"] == 2
     assert "SupportRecall@k" not in rows["base:closed"]
 
     summary = (tmp_path / "summary.md").read_text(encoding="utf-8")
