@@ -125,19 +125,21 @@ One model, Qwen3-1.7B, improved one technique at a time. Every stage is measured
 
 Qwen3-1.7B · 500 HotpotQA dev questions (distractor set, 4,943 pooled paragraphs) · 5 passages per answer · greedy decoding.
 
-| Stage | EM | F1 (95% CI) | Both gold passages retrieved | Wrong answers when evidence missing |
-|---|---|---|---|---|
-| 0 · model alone | 10.4 | 13.9 [11.2, 16.8] | – | – |
-| 1 · + RAG (single search) | 34.0 | 43.2 [39.1, 47.4] | 54.4% | – |
-| 2 · + iterative multi-hop retrieval | 37.2 | 47.8 [43.6, 52.0] | 59.8% | 83% |
-| 5 · + LoRA fine-tune (10k examples), multi-hop | **50.2** | **62.1 [58.2, 66.0]** | **74.8%** | **29%** |
+| Stage | EM | F1 (95% CI) | Both gold passages retrieved |
+|---|---|---|---|
+| 0 · model alone | 10.4 | 13.9 [11.2, 16.8] | – |
+| 1 · + RAG (single dense search) | 34.0 | 43.2 [39.1, 47.4] | 54.4% |
+| 2 · + iterative multi-hop retrieval | 37.2 | 47.8 [43.6, 52.0] | 59.8% |
+| 3 · + hybrid BM25 + dense, cross-encoder rerank | 43.6 | 54.4 [50.4, 58.5] | 75.8% |
+| 5 · + LoRA fine-tuned LLM (10k examples) | **58.4** | **71.2 [67.8, 74.7]** | **89.0%** |
 
-- Fine-tuning adds **+14.3 F1** over the best base pipeline (paired bootstrap 95% CI [+10.1, +18.6]).
-- The fine-tuned hop-2 query writer is the main driver: both supporting passages retrieved 74.8% vs 59.8%.
-- Trained abstention: when retrieval misses evidence, wrong answers drop from 83% to 29%; only 1.4% of questions are refused despite full evidence. Citation precision 91%, recall 97%.
+Each row adds one technique to the row above (rows 2–5 use iterative multi-hop retrieval).
+
+- **Fine-tuning** adds +16.8 F1 on top of the best base pipeline. The fine-tuned hop-2 query writer is a large part of it: with dense retrieval alone, both supporting passages are found 74.8% of the time vs 59.8% for the base model.
+- **Trained abstention:** when retrieval misses evidence (dense, multi-hop), wrong answers drop from 83% to 29%; only 1.4% of questions are refused despite full evidence. Citation precision 91%, recall 97%.
+- **Hybrid retrieval and reranking stack with fine-tuning:** fine-tuned multi-hop goes 62.1 → 64.8 (hybrid) → 71.2 F1 (+ reranker).
+- **Retriever fine-tuning (Stage 4)** takes 107 s and lifts single-hop dense retrieval from 54.4% to 70.8% both-gold recall (EM 34.0 → 39.2), close to hybrid + reranker. Combined with the reranker it adds nothing (71.0 vs 71.2 F1), because both fix the same misses, so the tuned embedder is the cheaper alternative when a reranker isn't affordable.
 - Splitting the question up front (decomposition) gave no gain (+0.6 F1, n.s.), so iterative retrieval is the multi-hop strategy.
-
-Stages 3 (hybrid retrieval + reranker) and 4 (retriever fine-tuning) are in progress.
 
 ### Training and inference efficiency (RTX 5070, 12 GB)
 

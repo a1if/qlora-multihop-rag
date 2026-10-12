@@ -125,8 +125,8 @@ The ladder
 - [x] Stage 0: no retrieval (closed-book baseline): EM 10.4 · F1 13.9
 - [x] Stage 1: + RAG, single-hop dense retrieval: EM 34.0 · F1 43.2 · support R@5 75.3%
 - [x] Stage 2: + multi-hop retrieval: iterative EM 37.2 · F1 47.8 (+4.6 F1 vs single, 95% CI [+1.7, +7.5]) · support R@5 77.8%. Decompose: EM 34.6 · F1 43.8 (+0.6, n.s.), so iterative is the multi-hop strategy going forward
-- [ ] Stage 3: + better retrieval: hybrid BM25 + dense, cross-encoder reranker
-- [ ] Stage 4: + fine-tuned retriever (contrastive tuning of the embedder on question → gold passages)
+- [x] Stage 3: + hybrid BM25 + dense (RRF) and cross-encoder rerank: base iterative EM 43.6 · F1 54.4 (both-gold 75.8%); ft_10k iterative EM 58.4 · F1 71.2 (both-gold 89.0%). Hybrid alone: base 52.3 / ft 64.8 F1
+- [x] Stage 4: + fine-tuned embedder (MNRL, 39,882 triplets, 107 s): dense single-hop both-gold 54.4% → 70.8%, EM 34.0 → 39.2; dense ft iterative 62.1 → 65.6 F1. With hybrid + rerank: no further gain (71.0 vs 71.2), overlaps with the reranker
 - [~] Stage 5: + fine-tuned model, LoRA SFT. First run `sft_10k` (10k examples, 34 min, 2,993 tok/s, eval loss 0.234): ft:iterative EM 50.2 · F1 62.1 (+14.3 F1 vs base iterative, CI [+10.1, +18.6]); both-gold retrieval 59.8% → 74.8%; wrong answers when evidence missing 83% → 29%; citation precision 91% / recall 97%. ft:single EM 36.8 · F1 46.7 (abstains 31%, mostly when gold missing). Full 30k run next. one LoRA adapter trained on two tasks:
   - reader: question + gold and distractor passages → short answer with citations, "insufficient evidence" when gold is missing
   - query writer: question + hop-1 passages → hop-2 search query (bridge entity)
@@ -136,9 +136,9 @@ Code needed for the ladder
 - [x] Data builder for the SFT tasks (`src/data_sft.py`): 20k train questions → 29,715 examples (17,847 reader · 2,031 abstain · 9,837 query), 743 val; prompts shared with the pipeline so train = inference text
 - [x] Rewrite `src/finetune.py`: same chat prompt as inference, loss on answer tokens only, over-length examples dropped (never truncated), tokenized-data cache, JSON/`--set` config per run, adapter + merged model + run_config.json + metrics.json (tokens/s, peak VRAM)
 - [ ] Throughput sweep on the 5070 (after baseline finishes): LoRA vs QLoRA, gradient checkpointing on/off, batch size → pick fastest setting that fits; record speed-up
-- [ ] Retriever fine-tuning script (`src/finetune_retriever.py`)
-- [ ] BM25 + reranker in `src/retriever.py`
-- [ ] Harness: select retriever variant per stage (`--retriever dense|hybrid|tuned`)
+- [x] Retriever fine-tuning script (`src/finetune_retriever.py`)
+- [x] BM25 + RRF + cross-encoder reranker in `src/retriever.py`
+- [x] Harness: `--retriever dense|hybrid|hybrid_rerank`, `--embedding-model <path>`
 - [ ] Extra metrics: citation precision/recall, hallucination rate on unanswerable variants
 
 Speed
