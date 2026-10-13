@@ -170,7 +170,7 @@ One model, Qwen3-1.7B, improved one technique at a time. Every stage is measured
 | 4 | Retriever fine-tuning | Contrastive tuning of the embedding model on question → supporting passages |
 | 5 | LLM fine-tuning | QLoRA SFT, one adapter for two tasks: grounded reader (citations, abstains when evidence is missing) and hop-2 query writer |
 
-### Results so far
+### Results
 
 Qwen3-1.7B · 500 HotpotQA dev questions (distractor set, 4,943 pooled paragraphs) · 5 passages per answer · greedy decoding.
 
@@ -189,6 +189,18 @@ Each row adds one technique to the row above (rows 2–5 use iterative multi-hop
 - **Hybrid retrieval and reranking stack with fine-tuning:** fine-tuned multi-hop goes 62.1 → 64.8 (hybrid) → 71.2 F1 (+ reranker).
 - **Retriever fine-tuning (Stage 4)** takes 107 s and lifts single-hop dense retrieval from 54.4% to 70.8% both-gold recall (EM 34.0 → 39.2), close to hybrid + reranker. Combined with the reranker it adds nothing (71.0 vs 71.2 F1), because both fix the same misses, so the tuned embedder is the cheaper alternative when a reranker isn't affordable.
 - Splitting the question up front (decomposition) gave no gain (+0.6 F1, n.s.), so iterative retrieval is the multi-hop strategy.
+- **More data didn't help:** training on all 29.7k examples (1 h 45 min) instead of 10k (34 min) lowered validation loss (0.234 → 0.201) but not benchmark accuracy (−1.1 F1, 95% CI [−3.7, +1.6]), so the 10k model is the final one.
+
+### Why not just use a bigger model?
+
+The same pipeline (hybrid retrieval + rerank, iterative multi-hop), the same 500 questions, with a 4.7× larger model that is not fine-tuned:
+
+| Model | EM | F1 (95% CI) | Throughput (RTX 5070) |
+|---|---|---|---|
+| Qwen3-8B, base, 4-bit | 56.8 | 69.3 [65.9, 72.8] | 0.31 questions/s |
+| **Qwen3-1.7B, LoRA fine-tuned** | **58.4** | **71.2 [67.8, 74.7]** | **2.61 questions/s** |
+
+The fine-tuned 1.7B model **matches the 8B model** (paired difference +1.6 EM [−2.4, +5.8], +2.0 F1 [−1.5, +5.4], not significant) **at ~8× the throughput** and a fraction of the memory. (The 8B model runs in 4-bit to fit in 12 GB, which may cost it a little accuracy.)
 
 ### Training and inference efficiency (RTX 5070, 12 GB)
 
