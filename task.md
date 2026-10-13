@@ -8,7 +8,16 @@ Legend: `[x]` done · `[ ]` todo · `[~]` written but not checked against real m
 
 ---
 
-## Resume here (paused 2026-10-13)
+## Resume here (paused 2026-10-13, evening)
+
+Done this session: sft_full benchmark (no gain over sft_10k → sft_10k is final), Qwen3-8B reference (fine-tuned 1.7B matches it at ~8× throughput, +2.0 F1 n.s.), recorded eval outputs + CI gates, Gemma 4 E4B attempt (failed on RAM / page file: C: is 98% full; needs freed RAM and fewer concurrent questions), agent benchmark + tool-use fine-tune (+19.7 F1). README has all results.
+
+Next ideas:
+1. Agent over-abstains (17%): fewer abstain traces (10% → 5%) or require 2 searches before abstaining; retrain (~1 h)
+2. Retry Gemma 4 E4B reference with WSL/other apps closed and `--workers 4` (`D:\qmr\models\gemma-4-E4B-it` is resharded)
+3. Final resume bullets; merge PR
+
+## Older resume notes (2026-10-13, afternoon)
 
 Improvement ladder so far (Qwen3-1.7B, HotpotQA dev n=500, k=5, iterative multi-hop from stage 2):
 
@@ -185,7 +194,7 @@ Understanding why it works (small ablations on Stage 5)
 - [x] 5. Observability: OpenTelemetry (SDK's per-request span + `rag.answer` / `retrieval.search` / `retrieval.rerank` / `llm.generate` children; OTLP / JSONL / console), JSON log per request with trace id, `python -m src.telemetry` latency summary; tested that one call = one connected trace
 - [~] 6. Eval set: 25 questions + 250 paragraphs in `evals/`, live BM25 hit-rate gates in CI; recorded-output faithfulness/citation/EM gates need the real-model recording (`python -m evals.record`, after training)
 - [x] 7. Dockerfile + compose `mcp` service, README: architecture diagram, MCP client setup (Inspector, Claude Desktop), tool table, observability, regression eval
-- [~] Stretch: LangGraph ReAct agent over the MCP tools (`src/agent.py`): local Qwen3 via a LangChain chat model on Qwen3's tool-call template, own MCP 2.x → LangChain tool adapter (langchain-mcp-adapters pins mcp<2), trace context into the server, step limit; 6 tests with a scripted model. Benchmark vs fixed pipeline pending (GPU)
+- [x] Stretch: LangGraph ReAct agent over the MCP tools. Results (100 q): base agent EM 36 / F1 44.4 (1.09 searches/q); thinking mode 29 / 33.7; tool-use LoRA (`agent_sft`, 7,040 steps from `src/data_agent.py`, 57 min, eval loss 0.145) EM 55 / F1 64.1, both-gold 93%, 1.97 searches/q, +19.7 F1 vs base agent [+8.3, +30.8]; vs fixed fine-tuned pipeline −4.9 F1 n.s.; over-abstains 17%. Earlier notes: (`src/agent.py`): local Qwen3 via a LangChain chat model on Qwen3's tool-call template, own MCP 2.x → LangChain tool adapter (langchain-mcp-adapters pins mcp<2), trace context into the server, step limit; 6 tests with a scripted model. Benchmark vs fixed pipeline pending (GPU)
 
 ### Phase 3: Ship the final model
 - [ ] Serve the best checkpoint with vLLM or Ollama; API `curl /v1/answer` works

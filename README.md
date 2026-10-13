@@ -202,6 +202,22 @@ The same pipeline (hybrid retrieval + rerank, iterative multi-hop), the same 500
 
 The fine-tuned 1.7B model **matches the 8B model** (paired difference +1.6 EM [−2.4, +5.8], +2.0 F1 [−1.5, +5.4], not significant) **at ~8× the throughput** and a fraction of the memory. (The 8B model runs in 4-bit to fit in 12 GB, which may cost it a little accuracy.)
 
+### Agent: fine-tuning for tool use
+
+A LangGraph ReAct agent drives the MCP tools itself (it decides what and how often to search). Same retrieval, the first 100 benchmark questions:
+
+| Approach | EM | F1 | Both gold passages seen | Searches / question |
+|---|---|---|---|---|
+| Base Qwen3-1.7B agent | 36 | 44.4 | 53% | 1.09 |
+| Base agent, thinking mode | 29 | 33.7 | 30% | 0.83 |
+| **Tool-use fine-tuned agent** (LoRA, 7,040 trace steps, 57 min) | **55** | **64.1** | **93%** | **1.97** |
+| Fine-tuned fixed 2-hop pipeline (reference) | 58 | 69.0 | 84% | 2.00 |
+
+- Left to plan, the 1.7B model searched once and stopped on 89/100 questions; thinking mode was worse (it skipped search on 48/100) and 20× slower.
+- Fine-tuning on HotpotQA tool-use traces (search the question → search the bridge entity → answer, plus early-stop and abstain variants, rendered byte-identically to the live agent) fixed it: **+19.7 F1** (95% CI [+8.3, +30.8]), two searches on 97/100 questions, and the highest evidence recall of any setup.
+- It is statistically level with the fixed pipeline (−4.9 F1, CI [−14.0, +4.2]); it over-abstains (17% vs 5%).
+- The pipeline-tuned model stopped calling tools entirely: narrow fine-tuning overrides general behaviour, so tool use needed its own training data.
+
 ### Training and inference efficiency (RTX 5070, 12 GB)
 
 | | Before | After | |
