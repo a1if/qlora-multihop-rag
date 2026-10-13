@@ -126,3 +126,31 @@ def test_every_request_is_logged(server, caplog):
     calls = [e for e in events if e["method"] == "tools/call"]
     assert [(e["tool"], e["outcome"]) for e in calls] == [("search", "ok"), ("get_passage", "tool_error")]
     assert all(e["duration_ms"] >= 0 for e in calls)
+
+
+def test_background_retriever_waits_then_serves(pipeline):
+    import threading
+
+    from src.mcp_server import BackgroundRetriever
+
+    release = threading.Event()
+
+    def slow_load():
+        release.wait(5)
+        return pipeline.retriever
+
+    bg = BackgroundRetriever(slow_load, timeout_s=5)
+    server = create_server(bg, pipeline.config, lambda: pipeline)   # must not block on the index
+    release.set()
+    out = call(server, "search", {"query": "polonium", "k": 1})
+    assert not out.is_error and out.structured_content["results"][0]["title"] == "Polonium"
+
+
+def test_background_retriever_reports_load_failure(pipeline):
+    from src.mcp_server import BackgroundRetriever
+
+    def broken():
+        raise FileNotFoundError("index.faiss missing")
+
+    server = create_server(BackgroundRetriever(broken, timeout_s=5), pipeline.config, lambda: pipeline)
+    assert "index.faiss missing" in error_text(call(server, "search", {"query": "polonium"}))

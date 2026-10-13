@@ -120,8 +120,13 @@ class HFLLM:
 
     def generate(self, instruction: str, max_new_tokens: int, do_sample: bool = False,
                  temperature: float = 0.3, top_p: float = 0.9, top_k: int = 40) -> str:
+        return self.complete(self.build_prompt(instruction), max_new_tokens, do_sample, temperature, top_p, top_k)
+
+    def complete(self, prompt: str, max_new_tokens: int, do_sample: bool = False,
+                 temperature: float = 0.3, top_p: float = 0.9, top_k: int = 40) -> str:
+        """Continue an already-rendered prompt (e.g. a multi-turn tool-calling chat)."""
         sampling = (("temperature", temperature), ("top_p", top_p), ("top_k", top_k)) if do_sample else ()
-        payload = (self.build_prompt(instruction), max_new_tokens, sampling)
+        payload = (prompt, max_new_tokens, sampling)
         if self._batcher is None:
             with self._lock:
                 return self._generate_batch([payload])[0]

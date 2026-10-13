@@ -36,7 +36,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field
 
 from src.retriever import doc_text
-from src.telemetry import current_trace_id, setup_tracing
+from src.telemetry import current_trace_id, setup_tracing, span
 from src.text_utils import parse_sources
 
 logger = logging.getLogger("qmr.mcp")
@@ -116,6 +116,50 @@ async def log_requests(ctx, call_next):
         }))
 
 
+# ─── Background Loading ───────────────────────────────────────────────────────
+
+class BackgroundRetriever:
+    """
+    Loads the retriever (embedder, reranker, BM25 index: ~35 s from disk) in a
+    thread, so the server answers the MCP handshake immediately. Tool calls that
+    arrive before it's ready wait for it, up to timeout_s.
+    """
+
+    def __init__(self, load: Callable[[], object], timeout_s: float = 300.0):
+        self.timeout_s = timeout_s
+        self._ready = threading.Event()
+        self._value, self._error = None, None
+        threading.Thread(target=self._run, args=(load,), name="retriever-loader", daemon=True).start()
+
+    def _run(self, load):
+        start = time.perf_counter()
+        try:
+            self._value = load()
+            logger.info(json.dumps({"event": "retriever_ready", "passages": len(self._value.docs),
+                                    "load_s": round(time.perf_counter() - start, 1)}))
+        except Exception as exc:
+            self._error = exc
+            logger.exception("retriever failed to load")
+        finally:
+            self._ready.set()
+
+    def get(self):
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        if not self._ready.wait(self.timeout_s):
+            raise ToolError("The search index is still loading; retry in a few seconds.")
+        if self._error is not None:
+            raise ToolError(f"The search index failed to load: {self._error}")
+        return self._value
+
+    @property
+    def docs(self):
+        return self.get().docs
+
+    def search(self, query: str, k: int):
+        return self.get().search(query, k)
+
+
 # ─── Server ───────────────────────────────────────────────────────────────────
 
 def create_server(retriever, config, get_pipeline: Callable[[], object], llm_name: str = "lazy"):
@@ -132,19 +176,28 @@ def create_server(retriever, config, get_pipeline: Callable[[], object], llm_nam
 
     server = MCPServer(name="multihop-rag", instructions=INSTRUCTIONS, version="1.0.0",
                        middleware=[log_requests])
-    by_id = {doc["id"]: doc for doc in retriever.docs}
-    id_range = f"{min(by_id)}-{max(by_id)}" if by_id else "none"
+    lookup: dict = {}
+
+    def passages_by_id() -> tuple[dict, str]:
+        # built on first use, so a background-loading retriever doesn't block startup
+        if not lookup:
+            by_id = {doc["id"]: doc for doc in retriever.docs}
+            lookup.update(by_id=by_id, id_range=f"{min(by_id)}-{max(by_id)}" if by_id else "none")
+        return lookup["by_id"], lookup["id_range"]
 
     @server.tool(description="Search the corpus. Returns the top-k passages with ids, titles, text previews and scores.")
     def search(query: QueryText, k: TopK = 5) -> SearchResult:
         if not query.strip():
             raise ToolError("query is empty: pass a question or an entity name to search for")
-        hits = retriever.search(query, k)
+        with span("retrieval.search", retrieval__query=query[:200], retrieval__k=k) as s:
+            hits = retriever.search(query, k)
+            s.set_attribute("retrieval.results", len(hits))
         return SearchResult(query=query, results=[_passage(d, PREVIEW_CHARS) for d in hits],
                             truncated_chars=PREVIEW_CHARS)
 
     @server.tool(description="Return the full text of one passage by its id (ids come from search results).")
     def get_passage(passage_id: Annotated[int, Field(description="Passage id from a search result")]) -> PassageDetail:
+        by_id, id_range = passages_by_id()
         doc = by_id.get(passage_id)
         if doc is None:
             raise ToolError(f"No passage with id {passage_id}. Valid ids are {id_range}; "
@@ -177,6 +230,7 @@ def create_server(retriever, config, get_pipeline: Callable[[], object], llm_nam
     @server.resource("corpus://info", name="corpus-info", mime_type="application/json",
                      description="Corpus size and pipeline configuration")
     def corpus_info() -> dict:
+        by_id, id_range = passages_by_id()
         return {"passages": len(by_id), "passage_ids": id_range, "retriever": config.retriever,
                 "llm": llm_name, "top_k": config.top_k, "hops": config.num_hops, "max_k": MAX_K}
 
@@ -216,9 +270,9 @@ def main(argv=None):
     from src.rag_pipeline import load_retriever
 
     config = config_from_env()
-    retriever = load_retriever(config)
-    logger.info(json.dumps({"event": "ready", "passages": len(retriever.docs), "retriever": config.retriever,
-                            "llm": config.llm, "tracing": tracing}))
+    retriever = BackgroundRetriever(lambda: load_retriever(config))
+    logger.info(json.dumps({"event": "ready", "retriever": config.retriever, "llm": config.llm,
+                            "tracing": tracing, "index": "loading in background"}))
     server = create_server(retriever, config, lazy_pipeline(retriever, config), llm_name=config.llm)
     if args.transport == "stdio":
         server.run("stdio")
