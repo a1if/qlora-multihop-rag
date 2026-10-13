@@ -22,6 +22,8 @@ prometheus-client>=0.20.0
 mcp>=2.2,<3                    # MCP server (src/mcp_server.py)
 opentelemetry-sdk>=1.40        # tracing (src/telemetry.py)
 opentelemetry-exporter-otlp-proto-http>=1.40
+langgraph>=1.2,<2              # agent (src/agent.py)
+langchain-core>=1.6,<2
 gradio>=4.26.0
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
