@@ -108,7 +108,8 @@ def tokenize(examples, tokenizer, max_len: int, batch_size: int = 512) -> tuple[
     features, dropped = [], 0
     for start in range(0, len(examples), batch_size):
         batch = examples[start:start + batch_size]
-        prompts = [render_prompt(tokenizer, ex.instruction, "chat", reasoning=False) for ex in batch]
+        prompts = [ex.instruction if ex.prerendered else render_prompt(tokenizer, ex.instruction, "chat", reasoning=False)
+                   for ex in batch]
         prompt_ids = tokenizer(prompts, add_special_tokens=False)["input_ids"]
         completion_ids = tokenizer([ex.response for ex in batch], add_special_tokens=False)["input_ids"]
         for p, c in zip(prompt_ids, completion_ids, strict=True):

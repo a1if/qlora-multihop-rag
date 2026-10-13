@@ -40,9 +40,10 @@ from src.text_utils import ABSTAIN, format_target
 @dataclass
 class SFTExample:
     id: str
-    task: str           # reader | abstain | query
+    task: str           # reader | abstain | query | agent
     instruction: str    # user turn, rendered with the chat template at training time
     response: str       # assistant turn (the only tokens that get loss)
+    prerendered: bool = False   # instruction is already a full chat prompt (multi-turn agent steps)
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
