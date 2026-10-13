@@ -21,7 +21,7 @@ Improvement ladder so far (Qwen3-1.7B, HotpotQA dev n=500, k=5, iterative multi-
 | 5 + LoRA SFT (sft_10k) | 58.4 | 71.2 [67.8, 74.7] | 89.0% |
 
 State at pause:
-- `sft_full` (all 29,683 examples) finished training; adapter + merged model in `D:\qmr\runs\sft_full\` (check `metrics.json`). Its benchmark was NOT run.
+- `sft_full` (all 29,683 examples) finished: 1,856 steps in 1 h 45 min, 2,911 tok/s, peak 5.1 GB, train loss 0.253, **eval loss 0.201** (sft_10k: 0.234). Adapter + merged model in `D:\qmr\runs\sft_full\`. Its benchmark was NOT run (stopped on request).
 - MCP server, telemetry, regression eval, LangGraph agent: code done and tested (see Phase 2b).
 
 Next steps, in order (GPU):
