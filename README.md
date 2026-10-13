@@ -6,7 +6,7 @@
 
 An end-to-end project on **improving a small open LLM (Qwen3-1.7B) for multi-hop question answering**: QLoRA fine-tuning of the reader model, a multi-hop retrieval pipeline, and a reproducible HotpotQA benchmark that measures how much each change actually helps.
 
-Around the model sits the engineering needed to iterate on it and ship it: a benchmark harness with significance testing, a FastAPI service with Prometheus metrics, and serving of your own checkpoints in-process or through vLLM / Ollama.
+Around the model sits the engineering needed to iterate on it and ship it: a benchmark harness with significance testing, an **MCP server** that exposes the pipeline as typed tools for agents, OpenTelemetry tracing, a FastAPI service with Prometheus metrics, and a regression eval that gates CI.
 
 ---
 
@@ -14,13 +14,17 @@ Around the model sits the engineering needed to iterate on it and ship it: a ben
 
 | Area | What's here |
 |---|---|
-| **Retrieval strategies** | `closed` (no retrieval), `single`-hop, `iterative` (LLM writes a follow-up search query from what it found), `decompose` (LLM splits the question up front). Every mode gives the reader the **same passage budget k**, so comparisons are fair. |
+| **Retrieval** | Dense FAISS, BM25 (own inverted index), hybrid via reciprocal rank fusion, cross-encoder reranking; contrastively fine-tuned embedder ([src/retriever.py](src/retriever.py), [src/finetune_retriever.py](src/finetune_retriever.py)) |
+| **Multi-hop strategies** | `closed`, `single`-hop, `iterative` (the LLM writes the next search from what it found), `decompose`. Every mode gives the reader the **same passage budget k**, so comparisons are fair. |
+| **MCP server** | `search`, `get_passage`, `answer` tools with Pydantic input/output schemas, limits, validation and actionable errors; stdio + streamable HTTP; LLM loads lazily ([src/mcp_server.py](src/mcp_server.py)) |
+| **Observability** | OpenTelemetry: a span per MCP request (SDK) with `rag.answer` → `retrieval.search` / `retrieval.rerank` / `llm.generate` children; OTLP, JSONL or console export; one JSON log line per request with trace id ([src/telemetry.py](src/telemetry.py)) |
 | **Serving your checkpoints** | Same pipeline runs the base or fine-tuned model in-process (`hf:<path>`) or served by vLLM / Ollama (`openai:<model>@<url>`), so every checkpoint is benchmarked and served identically ([src/llm.py](src/llm.py)) |
 | **Serving** | FastAPI `/v1/answer` with request validation, request-ID propagation, structured JSON logs, `/healthz` + `/readyz`, Prometheus `/metrics` with per-stage latency histograms ([src/api.py](src/api.py)) |
 | **Evaluation** | HotpotQA distractor dev set with official EM/F1, supporting-paragraph recall@k, bootstrap 95% CIs, paired-bootstrap significance against a reference system, p50/p95 latency and LLM-call cost per question ([src/eval_hotpotqa.py](src/eval_hotpotqa.py)) |
 | **Reliability** | Resumable JSONL predictions, concurrent evaluation over HTTP backends, thread-safe per-request timing, retries/timeouts on the HTTP client |
-| **Fine-tuning** | QLoRA (4-bit NF4 + LoRA) on Qwen3-1.7B, merged for serving ([src/finetune.py](src/finetune.py)) |
-| **Quality gates** | 57 unit/integration tests running in ~2 s with a fake embedder and scripted LLM (no model downloads), ruff, GitHub Actions on Python 3.10/3.12, Docker build check |
+| **Fine-tuning** | LoRA / QLoRA SFT on Qwen3-1.7B for two tasks (grounded reader with citations + abstention, hop-2 query writer); loss on answer tokens only with LM-head logits computed only over the answer span (2.8× faster, half the memory) ([src/finetune.py](src/finetune.py), [src/data_sft.py](src/data_sft.py)) |
+| **Speed** | Dynamic batching of concurrent generation calls for evaluation and serving (3.3× faster eval) ([src/batching.py](src/batching.py)) |
+| **Quality gates** | 115 tests (fake embedder + scripted LLM, real MCP client in-process), a 25-question regression eval with retrieval hit-rate and faithfulness gates, ruff, GitHub Actions on Python 3.10/3.12, Docker build check |
 
 ---
 
@@ -28,13 +32,20 @@ Around the model sits the engineering needed to iterate on it and ship it: a ben
 
 ```mermaid
 flowchart LR
-    C["Client"] -->|POST /v1/answer| API["FastAPI service<br/>validation · request IDs<br/>JSON logs · /metrics"]
-    API --> P["RAGPipeline<br/>closed | single | iterative | decompose"]
-    P -->|search| R["DenseRetriever<br/>FAISS inner-product<br/>MiniLM embeddings"]
-    P -->|generate| L{{"LLM protocol"}}
-    L --> HF["HFLLM<br/>in-process transformers<br/>(QLoRA merged model)"]
-    L --> OA["OpenAICompatibleLLM<br/>your checkpoint on vLLM / Ollama"]
-    E["Benchmark harness<br/>HotpotQA"] --> P
+    subgraph Clients
+        AG["LangGraph agent"]
+        CD["Claude Desktop · Cursor<br/>MCP Inspector"]
+        APP["Apps / curl"]
+        E["Benchmark + regression eval"]
+    end
+    AG & CD -->|MCP tools| MCP["MCP server<br/>search · get_passage · answer<br/>Pydantic schemas · validation"]
+    APP -->|POST /v1/answer| API["FastAPI service<br/>request IDs · /metrics"]
+    MCP & API & E --> P["RAGPipeline<br/>iterative multi-hop"]
+    P -->|search| R["HybridRetriever<br/>BM25 + FAISS dense → RRF<br/>→ cross-encoder rerank"]
+    P -->|generate| L{{"LLM protocol<br/>+ dynamic batching"}}
+    L --> HF["Fine-tuned Qwen3-1.7B<br/>(LoRA merged, in-process)"]
+    L --> OA["or the same checkpoint<br/>on vLLM / Ollama"]
+    MCP & P -.->|spans| OT[("OpenTelemetry<br/>OTLP / JSONL")]
 ```
 
 ### Iterative multi-hop retrieval
@@ -58,7 +69,7 @@ flowchart TD
 docker compose up -d ollama
 docker compose exec ollama ollama pull qwen3:1.7b
 docker compose run --rm indexer            # builds ./indexes/hotpotqa
-docker compose up -d api
+docker compose up -d api mcp                 # REST on :8080, MCP on :8765/mcp
 ```
 
 ```bash
@@ -80,7 +91,41 @@ Response (shape):
 }
 ```
 
-To serve the fine-tuned checkpoint instead, run it with vLLM (`vllm serve ./new_merged_model_fp32`) and point `QMR_LLM` at it.
+To serve the fine-tuned checkpoint instead, run it with vLLM (`vllm serve <run_dir>/merged`) and point `QMR_LLM` at it.
+
+### Use it from an MCP client
+
+The server speaks stdio (desktop clients) and streamable HTTP. Search tools only need the index; the LLM loads on the first `answer` call.
+
+```bash
+# Interactive: MCP Inspector (opens a local web UI)
+npx @modelcontextprotocol/inspector python -m src.mcp_server
+
+# Remote clients / agents
+python -m src.mcp_server --transport streamable-http      # http://127.0.0.1:8765/mcp
+```
+
+Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "multihop-rag": {
+      "command": "D:\\qmr\\venv\\Scripts\\python.exe",
+      "args": ["-m", "src.mcp_server"],
+      "cwd": "C:\\path\\to\\qlora-multihop-rag",
+      "env": {"QMR_LLM": "hf:D:/qmr/runs/sft_full/merged", "QMR_INDEX_DIR": "indexes/hotpotqa",
+              "QMR_RETRIEVER": "hybrid_rerank", "HF_HOME": "D:/qmr/hf-cache"}
+    }
+  }
+}
+```
+
+| Tool | Input | Output |
+|---|---|---|
+| `search` | `query` (1–500 chars), `k` (1–20, default 5) | `{query, results: [{id, title, text, score}]}` |
+| `get_passage` | `passage_id` | `{id, title, text, formatted}`; unknown ids get an error naming the valid range |
+| `answer` | `question`, `mode` (`iterative` default) | `{answer, queries, passages, citations, latency_s}` |
 
 ### GPU environment (training and local inference)
 
@@ -105,6 +150,10 @@ QMR_LLM=openai:qwen3:1.7b@http://localhost:11434/v1 QMR_INDEX_DIR=indexes/hotpot
 | `QMR_PROMPT_STYLE` | `chat` | `chat` (tokenizer template) or `alpaca` (fine-tune format), `hf:` only |
 | `QMR_REASONING` | `false` | Allow `<think>` reasoning (stripped from answers) |
 | `QMR_TOP_K` / `QMR_HOPS` | `5` / `2` | Default passage budget and hops |
+| `QMR_RETRIEVER` | `dense` | `dense`, `hybrid` (BM25 + dense, RRF) or `hybrid_rerank` |
+| `QMR_EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Embedding model name or path (e.g. the fine-tuned retriever) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Send traces to an OTLP collector (Jaeger, Tempo, Langfuse, ...) |
+| `QMR_TRACE_FILE` / `QMR_TRACE_CONSOLE` | unset | Write spans to a JSONL file / stderr |
 
 ---
 
@@ -174,16 +223,33 @@ Outputs go to `results/hotpotqa/`: per-question predictions (`preds/…/*.jsonl`
 
 ---
 
-## Fine-tuning the reader (QLoRA)
+## Regression eval (CI)
 
-```python
-from src.finetune import run_finetuning
-from configs.training_config import FinetuneConfig
+A 25-question slice of the benchmark lives in [evals/](evals/) (questions, their 250 paragraphs, gates in `thresholds.json`) and runs in GitHub Actions:
 
-run_finetuning(FinetuneConfig())   # 4-bit NF4 base + LoRA (r=128, α=64) → merged model
+- **Retrieval hit rate**, live: BM25 over the eval corpus must keep both gold paragraphs in the top 5 for ≥ 64% of questions and at least one for ≥ 92%.
+- **Answer quality on recorded outputs**: the real fine-tuned pipeline is recorded once through the MCP `answer` tool (`python -m evals.record`); CI gates EM, faithfulness (every answer word must appear in a passage it cites), citation precision, and whether abstentions happen only when evidence is missing.
+- `QMR_LIVE_EVAL=1 pytest tests/test_evals.py` re-runs the same checks against the live model on a GPU.
+
+## Observability
+
+```bash
+QMR_TRACE_FILE=traces.jsonl python -m src.mcp_server --transport streamable-http
+python -m src.telemetry traces.jsonl        # per-span count, errors, p50 / p95 latency
 ```
 
-The merged model can be loaded in-process (`hf:./new_merged_model_fp32`) or served with vLLM and benchmarked as `ft:*` systems against the base model. Training needs a CUDA GPU; serving and evaluation don't.
+One `answer` call produces a single trace: `tools/call answer` → `rag.answer` → `retrieval.search` ×2 (→ `retrieval.rerank`) and `llm.generate` ×2, with attributes such as the query, k, result count, model and token budget. Point `OTEL_EXPORTER_OTLP_ENDPOINT` at Jaeger or Langfuse for a UI.
+
+## Fine-tuning
+
+```bash
+python -m src.data_sft --n 20000 --out data/sft          # reader + abstain + query-writer examples
+python -m src.finetune --set run_name=sft_full            # LoRA, bf16, answer-span loss → adapter + merged model
+python -m src.finetune_retriever --n 20000                # contrastive embedder tuning (~2 min)
+python scripts/speed_sweep.py                             # throughput per training setting
+```
+
+The merged model is benchmarked as `ft:*` systems (`--model ft=hf:<run_dir>/merged`). Training needs a CUDA GPU; serving and evaluation don't.
 
 ---
 
@@ -191,9 +257,14 @@ The merged model can be loaded in-process (`hf:./new_merged_model_fp32`) or serv
 
 ```
 src/
-  llm.py            LLM protocol + HF / OpenAI-compatible backends
-  retriever.py      FAISS dense retriever, round-robin evidence merge
-  rag_pipeline.py   retrieval strategies, prompts, stage timing
+  llm.py            LLM protocol + HF / OpenAI-compatible backends, shared prompt rendering
+  batching.py       dynamic batching of concurrent generate() calls
+  retriever.py      dense FAISS, BM25, RRF hybrid, cross-encoder rerank, round-robin merge
+  rag_pipeline.py   retrieval strategies, prompts, stage timing, tracing spans
+  mcp_server.py     MCP server: search / get_passage / answer tools
+  telemetry.py      OpenTelemetry setup, spans, trace summary CLI
+  data_sft.py       SFT data builder (reader, abstain, query writer)
+  finetune_retriever.py  contrastive embedder fine-tuning
   text_utils.py     <think> stripping, answer / query / sub-question parsing
   metrics.py        EM, F1, support recall, bootstrap CIs
   hotpotqa.py       dataset loader + pooled corpus
@@ -201,8 +272,10 @@ src/
   api.py            FastAPI service
   app.py            Gradio demo
   build_index.py    index build CLI (arXiv or HotpotQA)
-  finetune.py       QLoRA training
-tests/              fake embedder + scripted LLM; pipeline, API, harness, backend tests
+  finetune.py       LoRA / QLoRA SFT with answer-span loss
+evals/              25-question regression set, checks, recorder, CI gates
+scripts/            GPU env setup, training throughput sweep
+tests/              fake embedder + scripted LLM; pipeline, MCP, tracing, eval, training tests
 configs/            dataclass configs
 notebooks/          original coursework notebook (superseded by src/)
 ```
@@ -211,7 +284,7 @@ notebooks/          original coursework notebook (superseded by src/)
 
 ```bash
 pip install -r requirements-dev.txt
-ruff check src tests configs
+ruff check src tests configs evals scripts
 pytest
 ```
 
