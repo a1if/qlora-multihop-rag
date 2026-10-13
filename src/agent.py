@@ -42,13 +42,20 @@ from src.text_utils import extract_answer, strip_reasoning
 
 SYSTEM_PROMPT = (
     "You answer questions by searching a Wikipedia corpus with the `search` tool.\n"
-    "Questions often need two facts. Search for the question first. If a passage names a person, "
-    "work or place you still need facts about, search for that name next. Use `get_passage` only if "
-    "a preview is cut off before the fact you need. Use at most {max_searches} searches.\n"
-    "When you know the answer, reply with exactly one line: 'Answer: <short answer>' (an entity, "
-    "date, number, or yes/no). If the passages do not contain the answer, reply "
+    "Most questions need two facts from two different articles. Work step by step:\n"
+    "1. Search for the question.\n"
+    "2. Read the results. If they name a person, work, place or organisation that the question "
+    "depends on, search for that name next (e.g. after finding who voices a character, search for "
+    "that actor).\n"
+    "3. Repeat until the passages contain the answer, using at most {max_searches} searches.\n"
+    "Use `get_passage` only if a preview is cut off before the fact you need.\n"
+    "When the passages contain the answer, reply with exactly one line: 'Answer: <short answer>' "
+    "(an entity, date, number, or yes/no). Only after at least two searches without finding it, reply "
     "'Answer: insufficient evidence'."
 )
+
+# Arguments the agent doesn't get to choose: a 1.7B model picks k=1 and starves itself of evidence.
+FIXED_ARGS = {"search": {"k": 5}}
 
 _TOOL_CALL = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
 _BARE_CALL = re.compile(r"\{\s*\"name\"\s*:\s*\"[^\"]+\"\s*,\s*\"arguments\"\s*:\s*\{.*?\}\s*\}", re.S)
@@ -106,6 +113,7 @@ class LocalToolChatModel(BaseChatModel):
 
     llm: Any
     max_new_tokens: int = 160
+    reasoning: bool = False          # Qwen3 thinking mode: better tool planning, ~3-5x more tokens
     tool_schemas: list[dict] = []
 
     @property
@@ -118,7 +126,7 @@ class LocalToolChatModel(BaseChatModel):
     def render(self, messages: list[BaseMessage]) -> str:
         return self.llm.tokenizer.apply_chat_template(
             to_chat_dicts(messages), tools=self.tool_schemas or None, tokenize=False,
-            add_generation_prompt=True, enable_thinking=False,
+            add_generation_prompt=True, enable_thinking=self.reasoning,
         )
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
@@ -140,25 +148,39 @@ def format_tool_result(name: str, data: dict) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
-async def load_mcp_tools(client, allowed: tuple[str, ...] = ("search", "get_passage")) -> list[StructuredTool]:
-    """Wrap an open MCP client's tools as LangChain tools (content for the model, artifact = structured result)."""
+def _without(schema: dict, fixed: dict) -> dict:
+    """Input schema with the fixed arguments removed, so the model never sees them."""
+    props = {k: v for k, v in schema.get("properties", {}).items() if k not in fixed}
+    required = [r for r in schema.get("required", []) if r not in fixed]
+    return {**schema, "properties": props, "required": required}
+
+
+async def load_mcp_tools(client, allowed: tuple[str, ...] = ("search", "get_passage"),
+                         fixed_args: dict | None = None) -> list[StructuredTool]:
+    """
+    Wrap an open MCP client's tools as LangChain tools (content for the model, artifact = structured result).
+    fixed_args pins some arguments (default: search k=5) and hides them from the model.
+    """
     from opentelemetry.propagate import inject
 
+    fixed_args = FIXED_ARGS if fixed_args is None else fixed_args
     tools = []
     for t in (await client.list_tools()).tools:
         if t.name not in allowed:
             continue
+        fixed = fixed_args.get(t.name, {})
 
-        async def call(_name=t.name, **kwargs):
+        async def call(_name=t.name, _fixed=fixed, **kwargs):
             meta: dict = {}
             inject(meta)                       # continue the agent's trace inside the server
-            result = await client.call_tool(_name, kwargs, meta=meta or None)
+            result = await client.call_tool(_name, {**kwargs, **_fixed}, meta=meta or None)
             if result.is_error:
                 return f"ERROR: {result.content[0].text}", {"error": True}
             data = result.structured_content or {}
             return format_tool_result(_name, data), data
 
-        tools.append(StructuredTool(name=t.name, description=t.description or t.name, args_schema=t.input_schema,
+        tools.append(StructuredTool(name=t.name, description=t.description or t.name,
+                                    args_schema=_without(t.input_schema, fixed),
                                     coroutine=call, response_format="content_and_artifact"))
     return tools
 
@@ -210,6 +232,7 @@ def main(argv=None):
     p.add_argument("--index", required=True, help="dense index dir")
     p.add_argument("--retriever", default="hybrid_rerank")
     p.add_argument("--max-steps", type=int, default=6)
+    p.add_argument("--reasoning", action="store_true", help="Qwen3 thinking mode before each step")
     p.add_argument("--eval", action="store_true", help="run on the benchmark sample instead of one question")
     p.add_argument("--n", type=int, default=500)
     p.add_argument("--seed", type=int, default=0)
@@ -231,7 +254,7 @@ def main(argv=None):
     retriever = load_retriever(config)
     server = create_server(retriever, config, lazy_pipeline(retriever, config), llm_name=args.llm)
     llm = make_llm(args.llm, max_batch_size=args.concurrency)
-    model = LocalToolChatModel(llm=llm)
+    model = LocalToolChatModel(llm=llm, reasoning=args.reasoning, max_new_tokens=768 if args.reasoning else 160)
 
     async def go():
         from mcp.client import Client
