@@ -8,22 +8,34 @@ Legend: `[x]` done · `[ ]` todo · `[~]` written but not checked against real m
 
 ---
 
-## Resume here (paused 2026-10-12)
+## Resume here (paused 2026-10-13)
 
-Baseline results so far (Qwen3-1.7B, HotpotQA dev n=500, k=5):
+Improvement ladder so far (Qwen3-1.7B, HotpotQA dev n=500, k=5, iterative multi-hop from stage 2):
 
-| Stage | EM | F1 (95% CI) | Support R@5 | All-support@5 | p50 latency |
-|---|---|---|---|---|---|
-| 0 closed-book | 10.4 | 13.9 [11.2, 16.8] | – | – | 0.38 s |
-| 1 single-hop RAG | 34.0 | 43.2 [39.1, 47.4] | 75.3 | 54.4 | 0.47 s |
-| 2 iterative multi-hop | 37.2 | 47.8 [43.6, 52.0] | 77.8 | 59.8 | 1.28 s |
+| Stage | EM | F1 (95% CI) | Both gold retrieved |
+|---|---|---|---|
+| 0 closed-book | 10.4 | 13.9 [11.2, 16.8] | – |
+| 1 single-hop RAG | 34.0 | 43.2 [39.1, 47.4] | 54.4% |
+| 2 iterative multi-hop | 37.2 | 47.8 [43.6, 52.0] | 59.8% |
+| 3 + hybrid BM25 + dense + rerank | 43.6 | 54.4 [50.4, 58.5] | 75.8% |
+| 5 + LoRA SFT (sft_10k) | 58.4 | 71.2 [67.8, 74.7] | 89.0% |
 
-Next steps, in order:
-1. Finish the baseline (decompose resumes from 231/500; now batched, so much faster):
-   `python -m src.eval_hotpotqa --n 500 --systems base:closed base:single base:iterative base:decompose --reference base:single --out results/baseline`
-2. Batching check: rerun `base:single base:iterative` with `--out results/batched`; compare wall time and answers with `results/baseline`
-3. ~~Training throughput sweep~~ (done, see Speed): `python -m src.finetune --set max_steps=40 --set merge_after_training=false --set run_name=speed_<variant> ...` over lora/qlora × gradient checkpointing on/off × batch size
-4. ~~First SFT run~~ (sft_10k done, see Stage 5). Next: full 30k run `python -m src.finetune --set run_name=sft_full` (~1.5 h), then Stages 3–4
+State at pause:
+- `sft_full` (all 29,683 examples) finished training; adapter + merged model in `D:\qmr\runs\sft_full\` (check `metrics.json`). Its benchmark was NOT run.
+- MCP server, telemetry, regression eval, LangGraph agent: code done and tested (see Phase 2b).
+
+Next steps, in order (GPU):
+1. Benchmark sft_full on the best retrieval:
+   `python -m src.eval_hotpotqa --n 500 --retriever hybrid_rerank --model ft=hf:D:/qmr/runs/sft_full/merged --systems ft:single ft:iterative --out results/full`
+   Compare with sft_10k (58.4 / 71.2) → data-size point; use the better model below.
+2. Gemma 4 E4B reference row (4-bit, local snapshot on C:, no fine-tuning, same retrieval):
+   `python -m src.eval_hotpotqa --n 500 --retriever hybrid_rerank --load-in-4bit --model gemma=hf:C:/Users/alift/.cache/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/ee0ef6023621cff504d758262d4e04895a5af4a2 --systems gemma:single gemma:iterative --out results/full`
+3. Record golden outputs for CI, then set `recorded` gates in `evals/thresholds.json` just below the measured values:
+   `python -m evals.record --llm hf:D:/qmr/runs/sft_full/merged --retriever hybrid_rerank --index results/full/index_n500_seed0 --name sft_full_hybrid_rerank`
+4. Agent benchmark (base and fine-tuned) vs fixed pipeline:
+   `python -m src.agent --eval --n 500 --llm hf:D:/qmr/runs/sft_full/merged --index results/full/index_n500_seed0 --name ft_agent`
+   (and `--llm hf:Qwen/Qwen3-1.7B --name base_agent`); summarise EM/F1, tool calls/question, throughput
+5. README results update (final ladder, agent row, Gemma reference, eval gates), resume bullets
 
 Environment (every new shell):
 ```powershell
@@ -31,7 +43,9 @@ $env:HF_HOME = "D:\qmr\hf-cache"; $env:HF_HUB_DISABLE_SYMLINKS_WARNING = "1"; $e
 & D:\qmr\venv\Scripts\Activate.ps1
 cd C:\Users\alift\qlora-multihop-rag
 ```
-Local, gitignored artifacts: `results/baseline/` (predictions + summary) and `data/sft/` (29,715 train / 743 val). Regenerate the data with `python -m src.data_sft --n 20000 --out data/sft`.
+Local, gitignored artifacts: `results/` (baseline, batched, full: predictions + summaries + indexes), `data/sft/` (29,715 train / 743 val), runs in `D:\qmr\runs\` (sft_10k, sft_full, retriever_minilm, speed_*). Regenerate the data with `python -m src.data_sft --n 20000 --out data/sft`.
+
+Note: free RAM is tight (~2 GB free during training). The CI-level test suite passes; a transient numpy MemoryError once came from that.
 
 ---
 
