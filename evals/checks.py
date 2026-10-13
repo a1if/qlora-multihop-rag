@@ -43,6 +43,8 @@ def thresholds() -> dict:
 
 
 def _words(text: str) -> set[str]:
+    # drop possessives first, or "Stephen King's novel" normalises to "kings" and misses "King"
+    text = re.sub(r"['’]s\b", "", text)
     return set(re.findall(r"[a-z0-9]+", normalize_answer(text)))
 
 

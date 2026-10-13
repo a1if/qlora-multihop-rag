@@ -47,6 +47,8 @@ def test_faithfulness_check_itself():
     assert not answer_supported("Family Guy", passages)
     assert not answer_supported("Ted", [])
     assert answer_supported("yes", passages * 2) and not answer_supported("no", passages)
+    # possessives in the evidence still support the bare name
+    assert answer_supported("Stephen King", [{"title": "The Shining", "text": "based on Stephen King's novel"}])
 
 
 @pytest.mark.parametrize("name", RECORDED or [pytest.param(None, marks=pytest.mark.skip("no recorded outputs yet"))])
@@ -57,6 +59,8 @@ def test_recorded_outputs_meet_gates(name):
     metrics = evaluate(load_jsonl(os.path.join(HERE, "recorded", name)), golden())
     failures = []
     for gate, limit in gates.items():          # gates look like "min_em": 0.5 or "max_wrong_when_evidence_missing": 0.4
+        if gate.startswith("_"):                # notes such as "_measured"
+            continue
         kind, metric = gate.split("_", 1)
         value = metrics[metric]
         if (kind == "min" and value < limit) or (kind == "max" and value > limit):

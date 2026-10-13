@@ -94,7 +94,8 @@ class HFLLM:
             model_path,
             dtype=dtype,
             quantization_config=quant,
-            device_map="auto" if cuda else None,
+            # 4-bit can't offload to CPU; pin it to the GPU (the planner over-estimates unquantized parts)
+            device_map={"": 0} if quant else ("auto" if cuda else None),
             trust_remote_code=True,
         )
         self.model.eval()

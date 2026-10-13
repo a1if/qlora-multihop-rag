@@ -1,5 +1,16 @@
 {
-  "_comment": "CI gates, set just below measured values. bm25: live over evals/corpus.jsonl. recorded: outputs of the MCP answer tool (real model) in evals/recorded/.",
+  "_comment": "CI gates, set just below measured values (25 questions: one question = 0.04). bm25: live over evals/corpus.jsonl. recorded: outputs of the MCP answer tool (real model) in evals/recorded/.",
   "bm25": {"k5_all_gold": 0.64, "k5_any_gold": 0.92, "k10_all_gold": 0.88},
-  "recorded": {}
+  "recorded": {
+    "sft_10k_hybrid_rerank": {
+      "_measured": "em 0.68, f1 0.739, all-gold 0.88, faithfulness 1.00, citation precision 0.958, abstentions justified 1/1, wrong when evidence missing 1/3",
+      "min_em": 0.60,
+      "min_f1": 0.66,
+      "min_retrieval_all_gold": 0.80,
+      "min_faithfulness": 0.95,
+      "min_citation_precision": 0.90,
+      "min_abstentions_justified": 1.0,
+      "max_wrong_when_evidence_missing": 0.50
+    }
+  }
 }
