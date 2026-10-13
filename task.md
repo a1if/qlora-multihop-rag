@@ -167,11 +167,11 @@ Understanding why it works (small ablations on Stage 5)
 - [x] 1. MCP docs / Python SDK: mcp 2.2.0 (`MCPServer`, the renamed `FastMCP`; in-process `Client` for tests)
 - [x] 2. Server with three tools (`search`, `get_passage`, `answer`), typed inputs with constraints + descriptions, Pydantic output models → output schemas (`src/mcp_server.py`)
 - [x] 3. Wraps the hybrid FAISS/BM25 retriever: k ≤ 20, length limits, `ToolError` messages that say what to do, lazy LLM load so search works without a GPU
-- [ ] 4. Test with an MCP client: done in code (real MCP client in-process, 13 tests); MCP Inspector run pending (after training frees the GPU)
+- [x] 4. Tested with MCP Inspector 2.8.0 (CLI, streamable HTTP) against the live server and real index: tools/list shows schemas (k 1–20, enums, output schemas); search('Glenn Quagmire voice actor') → Glenn Quagmire, search('Seth MacFarlane 2012 film') → Seth MacFarlane; k=50, unknown id, blank query → clear errors; every call logged with latency + trace id. Server now answers the handshake immediately and loads the index (~35 s) in the background
 - [x] 5. Observability: OpenTelemetry (SDK's per-request span + `rag.answer` / `retrieval.search` / `retrieval.rerank` / `llm.generate` children; OTLP / JSONL / console), JSON log per request with trace id, `python -m src.telemetry` latency summary; tested that one call = one connected trace
 - [~] 6. Eval set: 25 questions + 250 paragraphs in `evals/`, live BM25 hit-rate gates in CI; recorded-output faithfulness/citation/EM gates need the real-model recording (`python -m evals.record`, after training)
 - [x] 7. Dockerfile + compose `mcp` service, README: architecture diagram, MCP client setup (Inspector, Claude Desktop), tool table, observability, regression eval
-- [ ] Stretch: LangGraph agent over the MCP tools (agent decides its own hops), benchmarked against the fixed 2-hop pipeline
+- [~] Stretch: LangGraph ReAct agent over the MCP tools (`src/agent.py`): local Qwen3 via a LangChain chat model on Qwen3's tool-call template, own MCP 2.x → LangChain tool adapter (langchain-mcp-adapters pins mcp<2), trace context into the server, step limit; 6 tests with a scripted model. Benchmark vs fixed pipeline pending (GPU)
 
 ### Phase 3: Ship the final model
 - [ ] Serve the best checkpoint with vLLM or Ollama; API `curl /v1/answer` works
