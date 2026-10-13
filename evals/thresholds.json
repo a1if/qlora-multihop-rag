@@ -1,0 +1,5 @@
+{
+  "_comment": "CI gates, set just below measured values. bm25: live over evals/corpus.jsonl. recorded: outputs of the MCP answer tool (real model) in evals/recorded/.",
+  "bm25": {"k5_all_gold": 0.64, "k5_any_gold": 0.92, "k10_all_gold": 0.88},
+  "recorded": {}
+}

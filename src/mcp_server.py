@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 
 from src.retriever import doc_text
 from src.telemetry import current_trace_id, setup_tracing
+from src.text_utils import parse_sources
 
 logger = logging.getLogger("qmr.mcp")
 
@@ -47,7 +48,7 @@ INSTRUCTIONS = (
     "pipeline in one call."
 )
 MAX_K = 20
-PREVIEW_CHARS = 600
+PREVIEW_CHARS = 700   # = RAGConfig.max_passage_chars: clients see exactly what the reader saw
 
 
 # ─── Schemas ──────────────────────────────────────────────────────────────────
@@ -73,6 +74,7 @@ class AnswerResult(BaseModel):
     answer: str = Field(description="Short answer, or 'insufficient evidence'")
     queries: list[str] = Field(description="Searches the pipeline ran, in order")
     passages: list[Passage] = Field(description="Evidence given to the reader")
+    citations: list[int] = Field(description="Ids of the passages the answer cites (empty if none)")
     latency_s: float
 
 
@@ -166,9 +168,11 @@ def create_server(retriever, config, get_pipeline: Callable[[], object], llm_nam
             logger.exception("answer failed")
             raise ToolError(f"The answer pipeline failed ({type(exc).__name__}: {exc}). "
                             f"`search` still works for retrieving evidence directly.") from exc
+        cited = [result.passages[i - 1]["id"] for i in parse_sources(result.raw_output)
+                 if 0 < i <= len(result.passages)]
         return AnswerResult(answer=result.answer, queries=result.queries,
                             passages=[_passage(p, PREVIEW_CHARS) for p in result.passages],
-                            latency_s=round(result.latency_s, 3))
+                            citations=list(dict.fromkeys(cited)), latency_s=round(result.latency_s, 3))
 
     @server.resource("corpus://info", name="corpus-info", mime_type="application/json",
                      description="Corpus size and pipeline configuration")
