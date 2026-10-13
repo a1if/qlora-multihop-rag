@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 
 from src.llm import LLM, make_llm
 from src.retriever import DenseRetriever, doc_text, make_retriever, merge_round_robin
+from src.telemetry import span
 from src.text_utils import extract_answer, extract_query, parse_subquestions, strip_reasoning
 
 MODES = ("closed", "single", "iterative", "decompose")
@@ -132,14 +133,9 @@ class RAGPipeline:
 
     @classmethod
     def from_config(cls, config, llm_spec: str = None, index_dir: str = None) -> "RAGPipeline":
-        from sentence_transformers import SentenceTransformer
-
-        embedder = SentenceTransformer(config.embedding_model)
-        dense = DenseRetriever.load(index_dir or config.index_dir, embedder)
-        retriever = make_retriever(config.retriever, dense, config.rerank_model, config.retrieval_candidates)
         llm = make_llm(llm_spec or config.llm, config.prompt_style, config.reasoning, config.load_in_4bit,
                        config.hf_max_batch_size)
-        return cls(llm, retriever, config)
+        return cls(llm, load_retriever(config, index_dir), config)
 
     # ── Instrumented Calls ────────────────────────────────────────────────────
 
@@ -148,20 +144,27 @@ class RAGPipeline:
         if c.reasoning:
             max_new_tokens += c.reasoning_token_budget
         start = time.perf_counter()
-        try:
-            return self.llm.generate(
-                instruction, max_new_tokens, do_sample=c.do_sample,
-                temperature=c.temperature, top_p=c.top_p, top_k=c.top_k_sampling,
-            )
-        finally:
-            self._timer().add("llm", time.perf_counter() - start)
+        with span("llm.generate", gen_ai__request__model=getattr(self.llm, "name", None),
+                  gen_ai__request__max_tokens=max_new_tokens, llm__prompt_chars=len(instruction)) as s:
+            try:
+                output = self.llm.generate(
+                    instruction, max_new_tokens, do_sample=c.do_sample,
+                    temperature=c.temperature, top_p=c.top_p, top_k=c.top_k_sampling,
+                )
+                s.set_attribute("llm.output_chars", len(output))
+                return output
+            finally:
+                self._timer().add("llm", time.perf_counter() - start)
 
     def _search(self, query: str, k: int) -> list[dict]:
         start = time.perf_counter()
-        try:
-            return self.retriever.search(query, k)
-        finally:
-            self._timer().add("retrieval", time.perf_counter() - start)
+        with span("retrieval.search", retrieval__query=query[:200], retrieval__k=k) as s:
+            try:
+                hits = self.retriever.search(query, k)
+                s.set_attribute("retrieval.results", len(hits))
+                return hits
+            finally:
+                self._timer().add("retrieval", time.perf_counter() - start)
 
     def _read(self, question: str, passages: list[dict], short: bool) -> tuple[str, str]:
         prompt = reader_prompt(question, passages, self.config.max_passage_chars, short)
@@ -221,10 +224,22 @@ class RAGPipeline:
 
         self._local.timer = _StageTimer()
         start = time.perf_counter()
-        passages, queries = self._retrieve(question, mode, k, hops)
-        answer, raw = self._read(question, passages, short)
+        with span("rag.answer", rag__mode=mode, rag__k=k, rag__hops=hops, rag__question_chars=len(question)) as s:
+            passages, queries = self._retrieve(question, mode, k, hops)
+            answer, raw = self._read(question, passages, short)
+            timings = dict(self._local.timer.totals)
+            s.set_attributes({"rag.queries": len(queries), "rag.passages": len(passages),
+                              "rag.llm_calls": timings["llm_calls"]})
         return RAGResult(answer, raw, mode, passages, queries,
-                         latency_s=time.perf_counter() - start, timings=dict(self._local.timer.totals))
+                         latency_s=time.perf_counter() - start, timings=timings)
+
+
+def load_retriever(config, index_dir: str = None):
+    """Retriever from config: dense FAISS index, optionally wrapped as hybrid / reranked."""
+    from sentence_transformers import SentenceTransformer
+
+    dense = DenseRetriever.load(index_dir or config.index_dir, SentenceTransformer(config.embedding_model))
+    return make_retriever(config.retriever, dense, config.rerank_model, config.retrieval_candidates)
 
 
 # ─── arXiv Knowledge Base (demo corpus) ───────────────────────────────────────

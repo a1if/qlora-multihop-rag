@@ -189,7 +189,9 @@ class HybridRetriever:
         pool = reciprocal_rank_fusion([self.dense.search(query, n), self.bm25.search(query, n)], n)
         if self.reranker is None:
             return pool[:k]
-        with self._lock:
+        from src.telemetry import span
+
+        with self._lock, span("retrieval.rerank", retrieval__candidates=len(pool)):
             scores = self.reranker.predict([(query, doc_text(d)) for d in pool])
         ranked = sorted(zip(scores, range(len(pool)), pool, strict=True), key=lambda x: -x[0])[:k]
         return [{**doc, "score": float(score)} for score, _, doc in ranked]
