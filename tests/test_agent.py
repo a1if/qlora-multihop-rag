@@ -112,3 +112,72 @@ def test_step_limit_stops_runaway_agents(pipeline):
 
     result = anyio.run(go)
     assert result["stopped_at_limit"] and result["answer"] == ""
+
+
+class RepeatingLLM(ScriptedLLM):
+    """Searches the question, then the same bridge query again and again (agent v2's failure mode)."""
+
+    def complete(self, prompt, max_new_tokens, *args):
+        msgs = json.loads(prompt)["messages"]
+        tool_turns = [m for m in msgs if m["role"] == "tool"]
+        if tool_turns and "already searched" in tool_turns[-1]["content"]:
+            return "Answer: Poland"                                    # obeys the guardrail
+        q = QUESTION if not tool_turns else "Marie Curie"
+        return f'<tool_call>{{"name": "search", "arguments": {{"query": "{q}"}}}}</tool_call>'
+
+
+def test_repeated_search_is_blocked_and_agent_answers(pipeline):
+    server = create_server(pipeline.retriever, pipeline.config, lambda: pipeline)
+
+    async def go():
+        async with Client(server) as client:
+            agent = build_agent(LocalToolChatModel(llm=RepeatingLLM()), await load_mcp_tools(client))
+            return await run_agent(agent, QUESTION)
+
+    result = anyio.run(go)
+    assert result["answer"] == "Poland" and not result["stopped_at_limit"]
+    assert result["guardrail_hits"] == 1
+    assert result["queries"] == [QUESTION, "Marie Curie", "Marie Curie"]   # third attempt was blocked
+
+
+def test_search_budget_and_partial_results_at_step_limit(pipeline):
+    class Endless(ScriptedLLM):
+        def complete(self, prompt, max_new_tokens, *args):
+            n = len([m for m in json.loads(prompt)["messages"] if m["role"] == "tool"])
+            return f'<tool_call>{{"name": "search", "arguments": {{"query": "query {n}"}}}}</tool_call>'
+
+    server = create_server(pipeline.retriever, pipeline.config, lambda: pipeline)
+
+    async def go():
+        async with Client(server) as client:
+            agent = build_agent(LocalToolChatModel(llm=Endless()), await load_mcp_tools(client))
+            return await run_agent(agent, QUESTION, max_steps=6, max_searches=2)
+
+    result = anyio.run(go)
+    assert result["stopped_at_limit"]
+    assert len(result["queries"]) > 2 and result["guardrail_hits"] == len(result["queries"]) - 2
+    assert result["retrieved_titles"]                                 # partial run still reported
+
+
+def test_forced_final_answer_after_runaway_loop(pipeline):
+    class LoopsThenAnswersWithoutTools(ScriptedLLM):
+        def complete(self, prompt, max_new_tokens, *args):
+            data = json.loads(prompt.removesuffix("Answer:"))
+            if not data["tools"]:                                       # the tool-free final call (prefilled "Answer:")
+                seen = " ".join(m["content"] for m in data["messages"] if m["role"] == "tool")
+                return " Poland" if "born in Warsaw" in seen else " insufficient evidence"
+            n = len([m for m in data["messages"] if m["role"] == "tool"])
+            q = QUESTION if n == 0 else "Marie Curie"
+            return f'<tool_call>{{"name": "search", "arguments": {{"query": "{q}"}}}}</tool_call>'
+
+    server = create_server(pipeline.retriever, pipeline.config, lambda: pipeline)
+    model = LocalToolChatModel(llm=LoopsThenAnswersWithoutTools())
+
+    async def go():
+        async with Client(server) as client:
+            agent = build_agent(model, await load_mcp_tools(client))
+            return await run_agent(agent, QUESTION, max_steps=5, finalizer=model)
+
+    result = anyio.run(go)
+    assert result["stopped_at_limit"] and result["forced_answer"]
+    assert result["answer"] == "Poland"                                 # answered from evidence found before the loop

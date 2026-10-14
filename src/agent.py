@@ -23,6 +23,7 @@ Usage:
 """
 
 import argparse
+import contextvars
 import json
 import os
 import re
@@ -56,6 +57,33 @@ SYSTEM_PROMPT = (
 
 # Arguments the agent doesn't get to choose: a 1.7B model picks k=1 and starves itself of evidence.
 FIXED_ARGS = {"search": {"k": 5}}
+MAX_SEARCHES = 4
+
+# Guardrails, enforced in the tool layer per run: a small model can loop on the same failed search
+# (agent v2 searched "Ted (film)" until the step limit on all 100 questions).
+_RUN = contextvars.ContextVar("agent_run", default=None)
+REPEATED_SEARCH = ("You already searched for '{query}'. Do not search it again. Answer from the passages above "
+                   "with 'Answer: <short answer>', or reply 'Answer: insufficient evidence'.")
+FINAL_ANSWER = ("Stop searching. Using only the passages above, reply with exactly one line: "
+                "'Answer: <short answer>', or 'Answer: insufficient evidence' if they don't contain it.")
+SEARCH_LIMIT = ("Search limit reached ({limit} searches). Answer now from the passages above with "
+                "'Answer: <short answer>', or reply 'Answer: insufficient evidence'.")
+
+
+def _guard(name: str, args: dict) -> str | None:
+    """Message to return instead of running the tool, or None to run it."""
+    run = _RUN.get()
+    if run is None or name != "search":
+        return None
+    query = " ".join(str(args.get("query", "")).lower().split())
+    if query in run["queries"]:
+        run["guardrail_hits"] += 1
+        return REPEATED_SEARCH.format(query=args.get("query", ""))
+    if len(run["queries"]) >= run["max_searches"]:
+        run["guardrail_hits"] += 1
+        return SEARCH_LIMIT.format(limit=run["max_searches"])
+    run["queries"].append(query)
+    return None
 
 _TOOL_CALL = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
 _BARE_CALL = re.compile(r"\{\s*\"name\"\s*:\s*\"[^\"]+\"\s*,\s*\"arguments\"\s*:\s*\{.*?\}\s*\}", re.S)
@@ -171,6 +199,9 @@ async def load_mcp_tools(client, allowed: tuple[str, ...] = ("search", "get_pass
         fixed = fixed_args.get(t.name, {})
 
         async def call(_name=t.name, _fixed=fixed, **kwargs):
+            blocked = _guard(_name, kwargs)
+            if blocked is not None:
+                return blocked, {"guardrail": True}
             meta: dict = {}
             inject(meta)                       # continue the agent's trace inside the server
             result = await client.call_tool(_name, {**kwargs, **_fixed}, meta=meta or None)
@@ -185,7 +216,7 @@ async def load_mcp_tools(client, allowed: tuple[str, ...] = ("search", "get_pass
     return tools
 
 
-def build_agent(chat_model: BaseChatModel, tools: list, max_searches: int = 4):
+def build_agent(chat_model: BaseChatModel, tools: list, max_searches: int = MAX_SEARCHES):
     from langgraph.prebuilt import create_react_agent
 
     return create_react_agent(chat_model, tools, prompt=SYSTEM_PROMPT.format(max_searches=max_searches))
@@ -193,18 +224,50 @@ def build_agent(chat_model: BaseChatModel, tools: list, max_searches: int = 4):
 
 # ─── Running ──────────────────────────────────────────────────────────────────
 
-async def run_agent(agent, question: str, max_steps: int = 6) -> dict:
-    """One question -> answer, tool calls made, passages seen, latency."""
+def _history_for_final(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Conversation up to the last completed tool result, dropping LangGraph's out-of-steps
+    message and any trailing tool call that never got a response."""
+    keep = list(messages)
+    while keep and isinstance(keep[-1], AIMessage):
+        keep.pop()
+    return keep
+
+
+async def force_final_answer(chat_model, messages: list[BaseMessage]) -> str:
+    """One tool-free call asking for an answer from the evidence gathered so far."""
+    import anyio
+
+    model = chat_model.model_copy(update={"tool_schemas": []})
+    # Prefill "Answer:" so the reply can only be an answer: a model tuned hard on tool use
+    # otherwise emits another tool call even when no tools are offered.
+    prompt = model.render(_history_for_final(messages) + [HumanMessage(FINAL_ANSWER)]) + "Answer:"
+    text = await anyio.to_thread.run_sync(model.llm.complete, prompt, 32)
+    return "Answer:" + strip_reasoning(text).split("\n")[0]
+
+
+async def run_agent(agent, question: str, max_steps: int = 6, max_searches: int = MAX_SEARCHES,
+                    finalizer=None) -> dict:
+    """
+    One question -> answer, tool calls made, passages seen, latency.
+    finalizer: the agent's chat model; if the run ends without an answer (step limit, ignored
+    guardrails), it gets one tool-free call to answer from what was found ("forced" answer).
+    """
     from langgraph.errors import GraphRecursionError
 
     start = time.perf_counter()
+    run = {"queries": [], "max_searches": max_searches, "guardrail_hits": 0}
+    token = _RUN.set(run)
     with span("agent.run", agent__question_chars=len(question)) as s:
+        messages, stopped = [], False
         try:
-            state = await agent.ainvoke({"messages": [HumanMessage(question)]},
-                                        config={"recursion_limit": 2 * max_steps + 1})
-            messages, stopped = state["messages"], False
+            # stream states so a run cut off by the step limit still reports what it did
+            async for state in agent.astream({"messages": [HumanMessage(question)]}, stream_mode="values",
+                                             config={"recursion_limit": 2 * max_steps + 1}):
+                messages = state["messages"]
         except GraphRecursionError:
-            messages, stopped = [], True
+            stopped = True
+        finally:
+            _RUN.reset(token)
         calls = [c for m in messages if isinstance(m, AIMessage) for c in m.tool_calls]
         seen = []
         for m in messages:
@@ -212,7 +275,15 @@ async def run_agent(agent, question: str, max_steps: int = 6) -> dict:
                 passages = m.artifact.get("results") or ([m.artifact] if "title" in m.artifact else [])
                 seen += [p["title"] for p in passages if p.get("title") not in seen]
         final = next((m.content for m in reversed(messages) if isinstance(m, AIMessage) and not m.tool_calls), "")
-        s.set_attributes({"agent.tool_calls": len(calls), "agent.stopped_at_limit": stopped})
+        if final.startswith("Sorry, need more steps"):    # create_react_agent's out-of-steps message
+            final, stopped = "", True
+        if stopped:
+            final = ""
+        forced = False
+        if not final and finalizer is not None and messages:
+            final, forced = await force_final_answer(finalizer, messages), True
+        s.set_attributes({"agent.tool_calls": len(calls), "agent.stopped_at_limit": stopped,
+                          "agent.guardrail_hits": run["guardrail_hits"], "agent.forced_answer": forced})
     return {
         "answer": extract_answer(final) if final else "",
         "raw": final,
@@ -221,6 +292,8 @@ async def run_agent(agent, question: str, max_steps: int = 6) -> dict:
         "retrieved_titles": seen,
         "llm_calls": sum(isinstance(m, AIMessage) for m in messages),
         "stopped_at_limit": stopped,
+        "guardrail_hits": run["guardrail_hits"],
+        "forced_answer": forced,
         "latency_s": time.perf_counter() - start,
     }
 
@@ -262,17 +335,17 @@ def main(argv=None):
         async with Client(server) as client:
             agent = build_agent(model, await load_mcp_tools(client))
             if not args.eval:
-                result = await run_agent(agent, args.question, args.max_steps)
+                result = await run_agent(agent, args.question, args.max_steps, finalizer=model)
                 print(json.dumps(result, indent=2, ensure_ascii=False))
                 return
-            await evaluate_agent(agent, args)
+            await evaluate_agent(agent, args, finalizer=model)
 
     anyio.run(go)
     print(f"OOM batch splits: {getattr(llm, 'oom_splits', 0)}")
     llm.close()
 
 
-async def evaluate_agent(agent, args):
+async def evaluate_agent(agent, args, finalizer=None):
     import anyio
     from tqdm import tqdm
 
@@ -294,7 +367,7 @@ async def evaluate_agent(agent, args):
         async def one(ex):
             async with limiter:
                 try:
-                    r = await run_agent(agent, ex.question, args.max_steps)
+                    r = await run_agent(agent, ex.question, args.max_steps, finalizer=finalizer)
                 except Exception as exc:          # one failed question must not abort the run
                     r = {"answer": "", "raw": "", "tool_calls": [], "queries": [], "retrieved_titles": [],
                          "llm_calls": 0, "stopped_at_limit": False, "latency_s": 0.0,
