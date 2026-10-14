@@ -134,8 +134,9 @@ def main(argv=None):
     p.add_argument("--tokenizer", default="Qwen/Qwen3-1.7B")
     p.add_argument("--seed", type=int, default=1, help="differs from data_sft's seed, so different questions")
     p.add_argument("--early-stop-ratio", type=float, default=0.15)
-    p.add_argument("--abstain-ratio", type=float, default=0.03,
-                   help="0.10 made the agent refuse 15/100 questions despite having both gold passages")
+    p.add_argument("--abstain-ratio", type=float, default=0.10,
+                   help="0.10 = final agent. 0.03 cut over-refusal but the agent then never stopped searching "
+                        "(looped to the step limit on 100/100 questions); see REPORT.md section 5")
     p.add_argument("--out", default="data/agent")
     args = p.parse_args(argv)
 

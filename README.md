@@ -1,12 +1,49 @@
-# Multi-Hop RAG with QLoRA Fine-Tuning
+# Multi-Hop RAG with a Fine-Tuned Small LLM
 
 [![CI](https://github.com/a1if/qlora-multihop-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/a1if/qlora-multihop-rag/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
 
-An end-to-end project on **improving a small open LLM (Qwen3-1.7B) for multi-hop question answering**: QLoRA fine-tuning of the reader model, a multi-hop retrieval pipeline, and a reproducible HotpotQA benchmark that measures how much each change actually helps.
+An end-to-end project on **improving a small open LLM (Qwen3-1.7B) for multi-hop question answering**: LoRA fine-tuning of the reader model, a multi-hop retrieval pipeline, and a reproducible HotpotQA benchmark that measures how much each change actually helps.
 
 Around the model sits the engineering needed to iterate on it and ship it: a benchmark harness with significance testing, an **MCP server** that exposes the pipeline as typed tools for agents, OpenTelemetry tracing, a FastAPI service with Prometheus metrics, and a regression eval that gates CI.
+
+**Headline results** (500 HotpotQA dev questions, one RTX 5070):
+
+| | Result |
+|---|---|
+| Exact match, base model → final system | **10.4 → 58.4** (F1 13.9 → 71.2) |
+| vs a 4.7× larger Qwen3-8B (same pipeline, not fine-tuned) | **matches it** (71.2 vs 69.3 F1, n.s.) at **~8× the throughput** |
+| Both supporting passages retrieved | 54% → **89%** |
+| LangGraph agent after tool-use fine-tuning | **+19.7 F1** over the base agent |
+| Fine-tuning speed / memory | **2.8× faster**, 10.8 → 4.9 GB |
+
+📄 **[Full technical report](REPORT.md)** · 📊 **[Raw result tables](docs/results/)** (regenerate with `python scripts/export_results.py`)
+
+## Demo
+
+The chatbot (`.\scripts\run_chatbot.ps1`, then http://127.0.0.1:7860) answers with the fine-tuned model and shows its work: the searches it ran, every passage it read, and which ones it cited.
+
+| Answer with sources | Search trail and cited evidence (✓) |
+|---|---|
+| ![Chatbot answering "Ted" with sources Glenn Quagmire and Seth MacFarlane](docs/images/chatbot_answer.jpg) | ![Evidence panel: two searches, passages with the two cited ones ticked](docs/images/chatbot_evidence.jpg) |
+
+*Glenn Quagmire is voiced by the creator of what 2012 film?* → search the question → the model writes the follow-up search **"Seth MacFarlane"** → answers **Ted**, citing both passages (1.7 s).
+
+## Proof
+
+| Claim | Evidence |
+|---|---|
+| Improvement ladder, every stage | [dense](docs/results/benchmark_1_ladder_dense.md) · [hybrid](docs/results/benchmark_2_hybrid.md) · [hybrid + rerank](docs/results/benchmark_3_hybrid_rerank.md) |
+| Fine-tuned 1.7B matches Qwen3-8B | [8B reference run](docs/results/benchmark_6_reference_qwen3_8b_4bit.md) |
+| More data didn't help | [30k-example run](docs/results/benchmark_5_sft_full_30k.md) |
+| Retriever fine-tuning | [dense](docs/results/benchmark_4_tuned_embedder_dense.md) · [with rerank](docs/results/benchmark_4_tuned_embedder_hybrid_rerank.md) |
+| Agent results and ablations | [agents](docs/results/agents.md) |
+| Training speed-up and runs | [speed sweep](docs/results/training_speed_sweep.md) · [training runs](docs/results/training_runs.md) |
+| Faithfulness / citation gates in CI | [regression eval](docs/results/regression_eval.md) · [recorded outputs](evals/recorded/) |
+| MCP server works with a real client | [MCP Inspector session](docs/results/mcp_inspector.md) |
+
+Each table is regenerated from the saved per-question predictions by [`scripts/export_results.py`](scripts/export_results.py).
 
 ---
 
@@ -24,7 +61,7 @@ Around the model sits the engineering needed to iterate on it and ship it: a ben
 | **Reliability** | Resumable JSONL predictions, concurrent evaluation over HTTP backends, thread-safe per-request timing, retries/timeouts on the HTTP client |
 | **Fine-tuning** | LoRA / QLoRA SFT on Qwen3-1.7B for two tasks (grounded reader with citations + abstention, hop-2 query writer); loss on answer tokens only with LM-head logits computed only over the answer span (2.8× faster, half the memory) ([src/finetune.py](src/finetune.py), [src/data_sft.py](src/data_sft.py)) |
 | **Speed** | Dynamic batching of concurrent generation calls for evaluation and serving (3.3× faster eval) ([src/batching.py](src/batching.py)) |
-| **Quality gates** | 115 tests (fake embedder + scripted LLM, real MCP client in-process), a 25-question regression eval with retrieval hit-rate and faithfulness gates, ruff, GitHub Actions on Python 3.10/3.12, Docker build check |
+| **Quality gates** | 132 tests (fake embedder + scripted LLM, real MCP client in-process), a 25-question regression eval with retrieval hit-rate and faithfulness gates, ruff, GitHub Actions on Python 3.10/3.12, Docker build check |
 
 ---
 
@@ -168,7 +205,7 @@ One model, Qwen3-1.7B, improved one technique at a time. Every stage is measured
 | 2 | Multi-hop RAG | Iterative retrieval: the model writes a follow-up search query from what it found |
 | 3 | Better retrieval | Hybrid BM25 + dense search, cross-encoder reranking |
 | 4 | Retriever fine-tuning | Contrastive tuning of the embedding model on question → supporting passages |
-| 5 | LLM fine-tuning | QLoRA SFT, one adapter for two tasks: grounded reader (citations, abstains when evidence is missing) and hop-2 query writer |
+| 5 | LLM fine-tuning | LoRA SFT (bf16), one adapter for three tasks: grounded reader with citations, abstention when evidence is missing, and the hop-2 query writer |
 
 ### Results
 
@@ -293,6 +330,8 @@ src/
   mcp_server.py     MCP server: search / get_passage / answer tools
   telemetry.py      OpenTelemetry setup, spans, trace summary CLI
   data_sft.py       SFT data builder (reader, abstain, query writer)
+  data_agent.py     tool-use traces for the agent, rendered exactly as the live agent sees them
+  agent.py          LangGraph ReAct agent over the MCP tools, local tool-calling chat model, guardrails
   finetune_retriever.py  contrastive embedder fine-tuning
   text_utils.py     <think> stripping, answer / query / sub-question parsing
   metrics.py        EM, F1, support recall, bootstrap CIs
@@ -303,7 +342,10 @@ src/
   build_index.py    index build CLI (arXiv or HotpotQA)
   finetune.py       LoRA / QLoRA SFT with answer-span loss
 evals/              25-question regression set, checks, recorder, CI gates
-scripts/            GPU env setup, training throughput sweep
+scripts/           GPU env setup, chatbot launcher, training speed sweep, result export, resharder
+docs/results/       result tables regenerated from saved predictions (proof for every README number)
+docs/images/        chatbot screenshots
+REPORT.md           full technical report
 tests/              fake embedder + scripted LLM; pipeline, MCP, tracing, eval, training tests
 configs/            dataclass configs
 notebooks/          original coursework notebook (superseded by src/)
