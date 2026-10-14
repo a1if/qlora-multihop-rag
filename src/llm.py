@@ -84,7 +84,8 @@ class HFLLM:
         self.reasoning = reasoning
 
         cuda = torch.cuda.is_available()
-        dtype = torch.float32
+        # CPU default float32; QMR_CPU_DTYPE=bfloat16 halves RAM (1.7B: ~6.8 -> ~3.4 GB) for small devices
+        dtype = getattr(torch, os.environ.get("QMR_CPU_DTYPE", "float32"))
         if cuda:
             dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         quant = None
