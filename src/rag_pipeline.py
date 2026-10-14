@@ -2,222 +2,260 @@
 src/rag_pipeline.py
 Multi-hop Retrieval-Augmented Generation pipeline.
 
-Builds a FAISS index over arXiv paper abstracts and answers complex
-queries by decomposing them into sub-questions and retrieving evidence
-iteratively across multiple hops.
+Retrieval modes (all RAG modes give the reader the same budget of k passages):
+    closed     No retrieval; the model answers from its own weights.
+    single     One dense retrieval with the original question.
+    iterative  Retrieve with the question, ask the LLM for a follow-up search
+               query given what was found (e.g. the bridge entity), retrieve
+               again; repeat for `hops` rounds.
+    decompose  Ask the LLM to split the question into sub-questions up front and
+               retrieve for each one (falls back to the question if parsing fails).
 
 Usage:
-    from src.rag_pipeline import build_index, RAGPipeline
+    from src.rag_pipeline import RAGPipeline, build_arxiv_index
     from configs.training_config import RAGConfig
 
     config = RAGConfig()
+    build_arxiv_index(config)                       # one-time
 
-    # One-time: build the knowledge base
-    build_index(config)
-
-    # At inference time
-    pipeline = RAGPipeline(model_path="./new_merged_model_fp32", config=config)
-    answer, contexts, subqs, trace = pipeline.query("Your question here")
+    pipeline = RAGPipeline.from_config(config)      # LLM backend from config.llm
+    result = pipeline.answer("Your question here", mode="iterative")
+    print(result.answer, [p["title"] for p in result.passages], result.timings)
 """
 
-import torch
-import faiss
-import numpy as np
-from datasets import load_dataset, load_from_disk
-from sentence_transformers import SentenceTransformer
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import threading
+import time
+from dataclasses import dataclass, field
+
+from src.llm import LLM, make_llm
+from src.retriever import DenseRetriever, doc_text, make_retriever, merge_round_robin
+from src.telemetry import span
+from src.text_utils import extract_answer, extract_query, parse_subquestions, strip_reasoning
+
+MODES = ("closed", "single", "iterative", "decompose")
 
 
-# ─── Index Building ───────────────────────────────────────────────────────────
+# ─── Prompts ──────────────────────────────────────────────────────────────────
 
-def build_index(config):
-    """
-    Download arXiv abstracts, generate embeddings, build a FAISS L2 index,
-    and persist both the index and the raw documents to disk.
-    """
-    print(f"Loading {config.num_documents} arXiv abstracts...")
-    dataset = load_dataset(
-        config.dataset_name, split=f"train[:{config.num_documents}]"
+SHORT_ANSWER_RULE = (
+    "Respond with only the short answer (an entity, date, number, or yes/no) "
+    "on a single line in the form 'Answer: <answer>'."
+)
+
+READER_PROMPT = (
+    "Answer the question using the passages below. {rule}\n\n"
+    "Passages:\n{passages}\n\n"
+    "Question: {question}"
+)
+
+CLOSED_PROMPT = "Answer the question. {rule}\n\nQuestion: {question}"
+
+LONG_ANSWER_RULE = "Answer concisely and cite the passages you used like [1]."
+
+FOLLOWUP_PROMPT = (
+    "You are answering a multi-hop question one search at a time.\n\n"
+    "Question: {question}\n\n"
+    "Passages found so far:\n{passages}\n\n"
+    "Write ONE short search query for the information still missing to answer "
+    "the question (for example, the entity the passages above point to). "
+    "Respond with only the query on a single line."
+)
+
+DECOMPOSE_PROMPT = (
+    "Break the question into at most {n} simple sub-questions that can each be "
+    "answered by a single Wikipedia search, in the order they must be answered. "
+    "Write one sub-question per line.\n\n"
+    "Question: {question}"
+)
+
+
+FOLLOWUP_CONTEXT = 3   # passages shown to the follow-up query writer
+
+
+def format_passages(passages: list[dict], max_chars: int) -> str:
+    return "\n".join(f"[{i}] {doc_text(p)[:max_chars]}" for i, p in enumerate(passages, 1))
+
+
+# Prompt builders are shared with src/data_sft.py, so fine-tuning data uses
+# exactly the text the model sees at inference time.
+
+def reader_prompt(question: str, passages: list[dict], max_chars: int, short: bool = True) -> str:
+    rule = SHORT_ANSWER_RULE if short else LONG_ANSWER_RULE
+    if not passages:
+        return CLOSED_PROMPT.format(rule=rule, question=question)
+    return READER_PROMPT.format(rule=rule, question=question, passages=format_passages(passages, max_chars))
+
+
+def followup_prompt(question: str, passages: list[dict], max_chars: int) -> str:
+    return FOLLOWUP_PROMPT.format(
+        question=question, passages=format_passages(passages[:FOLLOWUP_CONTEXT], max_chars)
     )
-    documents = dataset["abstract"]
-
-    print(f"Encoding documents with {config.embedding_model}...")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    embedder = SentenceTransformer(config.embedding_model, device=device)
-    embeddings = embedder.encode(
-        documents, show_progress_bar=True, convert_to_tensor=False
-    ).astype("float32")
-
-    print("Building FAISS L2 index...")
-    index = faiss.IndexFlatL2(embeddings.shape[1])
-    index.add(embeddings)
-
-    faiss.write_index(index, config.index_path)
-    dataset.save_to_disk(config.docs_path)
-
-    print(f"Index saved: {config.index_path}")
-    print(f"Documents saved: {config.docs_path}")
-    print(f"Index contains {index.ntotal} vectors of dimension {embeddings.shape[1]}")
 
 
-# ─── RAG Pipeline Class ───────────────────────────────────────────────────────
+# ─── RAG Pipeline ─────────────────────────────────────────────────────────────
+
+@dataclass
+class RAGResult:
+    answer: str
+    raw_output: str
+    mode: str
+    passages: list[dict] = field(default_factory=list)
+    queries: list[str] = field(default_factory=list)
+    latency_s: float = 0.0
+    timings: dict = field(default_factory=dict)   # retrieval_s, llm_s, llm_calls
+
+
+class _StageTimer:
+    """Accumulates wall-clock time and call counts per pipeline stage."""
+
+    def __init__(self):
+        self.totals = {"retrieval_s": 0.0, "llm_s": 0.0, "llm_calls": 0}
+
+    def add(self, stage: str, seconds: float):
+        self.totals[f"{stage}_s"] += seconds
+        if stage == "llm":
+            self.totals["llm_calls"] += 1
+
 
 class RAGPipeline:
-    """
-    Multi-hop RAG controller.
-
-    Workflow per query:
-        1. Decompose query into sub-questions (LLM-guided)
-        2. For each hop: FAISS retrieval → reasoning trace
-        3. Generate follow-up questions from accumulated trace
-        4. Synthesise a final answer over all retrieved evidence
-    """
-
-    def __init__(self, model_path: str, config):
+    def __init__(self, llm: LLM, retriever: DenseRetriever | None, config):
+        self.llm = llm
+        self.retriever = retriever
         self.config = config
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # per-thread stage timings, so concurrent answer() calls don't mix
+        self._local = threading.local()
 
-        # Load LLM
-        print(f"Loading model from {model_path}...")
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto",
-            trust_remote_code=True,
-        )
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.tokenizer.padding_side = "left"
+    def _timer(self) -> "_StageTimer":
+        """This thread's timer; created on first use if answer() didn't start one."""
+        if not hasattr(self._local, "timer"):
+            self._local.timer = _StageTimer()
+        return self._local.timer
 
-        # Load FAISS index and documents
-        print("Loading FAISS index and knowledge base...")
-        self.index = faiss.read_index(config.index_path)
-        dataset = load_from_disk(config.docs_path)
-        self.documents = dataset["abstract"]
+    @classmethod
+    def from_config(cls, config, llm_spec: str = None, index_dir: str = None) -> "RAGPipeline":
+        llm = make_llm(llm_spec or config.llm, config.prompt_style, config.reasoning, config.load_in_4bit,
+                       config.hf_max_batch_size)
+        return cls(llm, load_retriever(config, index_dir), config)
 
-        # Load embedding model
-        self.embedder = SentenceTransformer(config.embedding_model, device=device)
-        print("RAGPipeline ready.")
+    # ── Instrumented Calls ────────────────────────────────────────────────────
 
-    # ── LLM Generation ────────────────────────────────────────────────────────
+    def _llm(self, instruction: str, max_new_tokens: int) -> str:
+        c = self.config
+        if c.reasoning:
+            max_new_tokens += c.reasoning_token_budget
+        start = time.perf_counter()
+        with span("llm.generate", gen_ai__request__model=getattr(self.llm, "name", None),
+                  gen_ai__request__max_tokens=max_new_tokens, llm__prompt_chars=len(instruction)) as s:
+            try:
+                output = self.llm.generate(
+                    instruction, max_new_tokens, do_sample=c.do_sample,
+                    temperature=c.temperature, top_p=c.top_p, top_k=c.top_k_sampling,
+                )
+                s.set_attribute("llm.output_chars", len(output))
+                return output
+            finally:
+                self._timer().add("llm", time.perf_counter() - start)
 
-    def _generate(self, prompt: str, max_new_tokens: int = None, temperature: float = None) -> str:
-        max_new_tokens = max_new_tokens or self.config.max_new_tokens
-        temperature = temperature or self.config.temperature
+    def _search(self, query: str, k: int) -> list[dict]:
+        start = time.perf_counter()
+        with span("retrieval.search", retrieval__query=query[:200], retrieval__k=k) as s:
+            try:
+                hits = self.retriever.search(query, k)
+                s.set_attribute("retrieval.results", len(hits))
+                return hits
+            finally:
+                self._timer().add("retrieval", time.perf_counter() - start)
 
-        inputs = self.tokenizer(
-            prompt, return_tensors="pt", truncation=True, max_length=2048
-        )
-        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+    def _read(self, question: str, passages: list[dict], short: bool) -> tuple[str, str]:
+        prompt = reader_prompt(question, passages, self.config.max_passage_chars, short)
+        max_tokens = self.config.max_new_tokens if short else self.config.max_new_tokens_long
+        raw = self._llm(prompt, max_tokens)
+        return (extract_answer(raw) if short else strip_reasoning(raw)), raw
 
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=self.config.top_p,
-                top_k=self.config.top_k_sampling,
-                eos_token_id=self.tokenizer.eos_token_id,
-                pad_token_id=self.tokenizer.pad_token_id,
-            )
-        return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+    def _followup_query(self, question: str, passages: list[dict]) -> str:
+        prompt = followup_prompt(question, passages, self.config.max_passage_chars)
+        return extract_query(self._llm(prompt, 32)) or question
 
-    # ── Retrieval ─────────────────────────────────────────────────────────────
+    def _decompose(self, question: str, n: int) -> list[str]:
+        raw = self._llm(DECOMPOSE_PROMPT.format(n=n, question=question), 96)
+        return parse_subquestions(raw, n)
 
-    def _embed(self, texts: list) -> np.ndarray:
-        return self.embedder.encode(
-            texts, convert_to_numpy=True, normalize_embeddings=True
-        ).astype("float32")
+    # ── Retrieval Strategies ──────────────────────────────────────────────────
 
-    def _search(self, query: str, k: int = None) -> list[int]:
-        k = k or self.config.top_k
-        query_vec = self._embed([query])
-        _, indices = self.index.search(query_vec, k)
-        return [int(i) for i in indices[0]]
+    def _retrieve(self, question: str, mode: str, k: int, hops: int) -> tuple[list[dict], list[str]]:
+        if mode == "closed":
+            return [], []
+        if mode == "single":
+            return self._search(question, k), [question]
 
-    def _format_context(self, doc_ids: list[int], max_chars: int = None) -> tuple[str, list[str]]:
-        max_chars = max_chars or self.config.max_context_chars
-        texts = [self.documents[i] for i in doc_ids]
-        joined = "\n\n---\n\n".join(texts)
-        return joined[:max_chars], texts
+        if mode == "decompose":
+            queries = self._decompose(question, hops) or [question]
+            return merge_round_robin([self._search(q, k) for q in queries], k), queries
 
-    # ── Sub-Question Decomposition ────────────────────────────────────────────
+        queries, ranked = [question], [self._search(question, k)]
+        if mode == "iterative":
+            for _ in range(hops - 1):
+                evidence = merge_round_robin(ranked, k)
+                query = self._followup_query(question, evidence)
+                queries.append(query)
+                ranked.append(self._search(query, k))
+        else:
+            raise ValueError(f"Unknown mode {mode!r}; expected one of {MODES}")
+        return merge_round_robin(ranked, k), queries
 
-    def _decompose(self, question: str, hops: int) -> list[str]:
-        prompt = (
-            f"Break the following question into {hops} short, logical sub-questions "
-            f"to answer sequentially:\n\nQuestion: {question}\nSub-questions:"
-        )
-        raw = self._generate(prompt, max_new_tokens=120, temperature=0.3)
-        lines = [l.strip("- ").strip() for l in raw.splitlines() if l.strip()]
-        subs = [l.split(".", 1)[-1].strip() if "." in l[:3] else l for l in lines]
-        return subs[:hops] if subs else [question]
+    # ── Main Interface ────────────────────────────────────────────────────────
 
-    def _make_followup(self, question: str, trace: list[str]) -> str:
-        prompt = (
-            f"You are solving a multi-hop question.\n"
-            f"Original: {question}\n"
-            f"Current reasoning:\n{'  '.join(trace)}\n\n"
-            f"Suggest ONE next short sub-question:"
-        )
-        result = self._generate(prompt, max_new_tokens=60, temperature=0.3)
-        return result.strip().splitlines()[0].strip()
-
-    # ── Answer Synthesis ──────────────────────────────────────────────────────
-
-    def _synthesise(self, question: str, evidence: list[str]) -> str:
-        context = "\n\n---\n\n".join(evidence)
-        prompt = (
-            f"### Instruction:\nAnswer the question using the context below.\n\n"
-            f"### Context:\n{context}\n\n"
-            f"### Guidance:\n"
-            f"- Reuse key phrases and terminology from the context.\n"
-            f"- Keep the answer factual and concise.\n\n"
-            f"### Question:\n{question}\n\n"
-            f"### Response:"
-        )
-        return self._generate(prompt, max_new_tokens=self.config.max_new_tokens, temperature=0.3)
-
-    # ── Main Query Interface ──────────────────────────────────────────────────
-
-    def query(
-        self,
-        question: str,
-        hops: int = None,
-        k: int = None,
-    ) -> tuple[str, list[str], list[str], list[str]]:
+    def answer(self, question: str, mode: str = "iterative", k: int = None, hops: int = None,
+               short: bool = True) -> RAGResult:
         """
-        Answer a question using multi-hop RAG.
-
         Args:
             question: The user query.
-            hops:     Number of retrieval hops (default: config.num_hops).
-            k:        Top-k documents per hop (default: config.top_k).
-
-        Returns:
-            answer:       Final synthesised answer.
-            contexts:     List of retrieved document snippets used.
-            subquestions: Decomposed sub-questions for this query.
-            trace:        Step-by-step reasoning trace.
+            mode:     One of MODES.
+            k:        Passages given to the reader (same budget for every mode).
+            hops:     Retrieval rounds for iterative / max sub-questions for decompose.
+            short:    Short-answer extraction (benchmarks) vs free-form cited answer (demo).
         """
-        hops = hops or self.config.num_hops
+        if mode not in MODES:
+            raise ValueError(f"Unknown mode {mode!r}; expected one of {MODES}")
+        if mode != "closed" and self.retriever is None:
+            raise ValueError(f"Mode {mode!r} needs a retriever")
         k = k or self.config.top_k
+        hops = hops or self.config.num_hops
 
-        subquestions = self._decompose(question, hops)
-        evidence_ids, trace = [], []
-        current_q = subquestions[0] if subquestions else question
+        self._local.timer = _StageTimer()
+        start = time.perf_counter()
+        with span("rag.answer", rag__mode=mode, rag__k=k, rag__hops=hops, rag__question_chars=len(question)) as s:
+            passages, queries = self._retrieve(question, mode, k, hops)
+            answer, raw = self._read(question, passages, short)
+            timings = dict(self._local.timer.totals)
+            s.set_attributes({"rag.queries": len(queries), "rag.passages": len(passages),
+                              "rag.llm_calls": timings["llm_calls"]})
+        return RAGResult(answer, raw, mode, passages, queries,
+                         latency_s=time.perf_counter() - start, timings=timings)
 
-        for hop in range(hops):
-            retrieved = self._search(current_q, k=k)
-            evidence_ids += [i for i in retrieved if i not in evidence_ids]
 
-            ctx_text, _ = self._format_context(retrieved, max_chars=800)
-            trace.append(f"[Hop {hop + 1}] Q: {current_q}\nContext:\n{ctx_text[:500]}")
+def load_retriever(config, index_dir: str = None):
+    """Retriever from config: dense FAISS index, optionally wrapped as hybrid / reranked."""
+    from sentence_transformers import SentenceTransformer
 
-            if hop < hops - 1:
-                current_q = self._make_followup(question, trace)
+    dense = DenseRetriever.load(index_dir or config.index_dir, SentenceTransformer(config.embedding_model))
+    return make_retriever(config.retriever, dense, config.rerank_model, config.retrieval_candidates)
 
-        _, contexts = self._format_context(evidence_ids, max_chars=self.config.max_context_chars)
-        answer = self._synthesise(question, contexts)
 
-        return answer, contexts, subquestions, trace
+# ─── arXiv Knowledge Base (demo corpus) ───────────────────────────────────────
+
+def build_arxiv_index(config):
+    """Download arXiv abstracts, embed them and save a DenseRetriever index."""
+    from datasets import load_dataset
+    from sentence_transformers import SentenceTransformer
+
+    print(f"Loading {config.num_documents} arXiv abstracts...")
+    dataset = load_dataset(config.dataset_name, split=f"train[:{config.num_documents}]")
+    docs = [
+        {"id": i, "title": " ".join(row["title"].split()), "text": " ".join(row["abstract"].split())}
+        for i, row in enumerate(dataset)
+    ]
+    embedder = SentenceTransformer(config.embedding_model)
+    retriever = DenseRetriever.build(docs, embedder)
+    retriever.save(config.index_dir)
+    print(f"Index with {retriever.index.ntotal} passages saved to {config.index_dir}")

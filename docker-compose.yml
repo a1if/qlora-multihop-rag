@@ -1,0 +1,50 @@
+# Local stack: Ollama serves the LLM, the API does retrieval + orchestration.
+#
+#   docker compose up -d ollama
+#   docker compose exec ollama ollama pull qwen3:1.7b
+#   docker compose run --rm indexer          # one-time: builds ./indexes/hotpotqa
+#   docker compose up -d api mcp             # REST on :8080, MCP (streamable HTTP) on :8765/mcp
+#   curl -s localhost:8080/v1/answer -H 'content-type: application/json' \
+#        -d '{"question": "Which country was the discoverer of polonium born in?"}'
+#
+# To serve the fine-tuned checkpoint, run it under vLLM and point QMR_LLM at that server.
+
+services:
+  ollama:
+    image: ollama/ollama:0.3.14
+    ports: ["11434:11434"]
+    volumes: [ollama:/root/.ollama]
+
+  indexer:
+    build: .
+    profiles: [tools]
+    command: ["python", "-m", "src.build_index", "--hotpotqa", "--n", "500", "--out", "/app/indexes/hotpotqa"]
+    user: root
+    volumes: [./indexes:/app/indexes]
+
+  api:
+    build: .
+    ports: ["8080:8080"]
+    depends_on: [ollama]
+    environment:
+      QMR_LLM: openai:qwen3:1.7b@http://ollama:11434/v1
+      QMR_INDEX_DIR: /app/indexes/hotpotqa
+      QMR_REASONING: "true"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes: [./indexes:/app/indexes:ro]
+
+  mcp:
+    build: .
+    command: ["python", "-m", "src.mcp_server", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8765"]
+    ports: ["8765:8765"]
+    depends_on: [ollama]
+    environment:
+      QMR_LLM: openai:qwen3:1.7b@http://ollama:11434/v1
+      QMR_INDEX_DIR: /app/indexes/hotpotqa
+      QMR_RETRIEVER: hybrid_rerank
+      QMR_REASONING: "true"
+      QMR_TRACE_FILE: /tmp/traces.jsonl
+    volumes: [./indexes:/app/indexes:ro]
+
+volumes:
+  ollama:

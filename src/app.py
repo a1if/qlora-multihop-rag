@@ -1,170 +1,117 @@
 """
 src/app.py
-Gradio chat interface for the QLoRA + Multi-Hop RAG system.
+Gradio chat demo for the multi-hop RAG pipeline.
 
-Features:
-    - Conversational memory (multi-turn)
-    - Source citation panel
-    - Inference timing
-    - Toggle between RAG and fine-tuned-only modes
+Uses the same environment configuration as the API service (QMR_LLM,
+QMR_INDEX_DIR, QMR_RETRIEVER, ...), so the demo can run the model in-process
+or through a vLLM / Ollama server. scripts/run_chatbot.ps1 sets these for the
+fine-tuned model and the HotpotQA index.
 
 Usage:
-    python src/app.py
-    # Opens at http://localhost:7860
+    python -m src.app
+    # Opens at http://127.0.0.1:7860
 """
 
-import time
-import torch
+import os
+
 import gradio as gr
+
+from src.api import config_from_env
 from src.rag_pipeline import RAGPipeline
-from configs.training_config import RAGConfig
+from src.text_utils import is_abstention, parse_sources
 
 # ─── Load Pipeline ────────────────────────────────────────────────────────────
 
-config = RAGConfig()
-pipeline = RAGPipeline(model_path="./new_merged_model_fp32", config=config)
+config = config_from_env()
+pipeline = RAGPipeline.from_config(config)
+
+EXAMPLES = [
+    "Glenn Quagmire is voiced by the creator of what 2012 film?",
+    "Venus is a play by an American playwright who won what prize?",
+    "Which university was founded first, Duke University or Tufts University?",
+]
 
 
 # ─── Inference ────────────────────────────────────────────────────────────────
 
-def respond(
-    message: str,
-    history: list,
-    use_rag: bool,
-    num_hops: int,
-    top_k: int,
-) -> tuple[list, str, str]:
-    """
-    Generate a response and return updated history, sources, and timing.
-
-    Args:
-        message:  Current user message.
-        history:  List of (user, assistant) turn pairs.
-        use_rag:  Whether to use multi-hop RAG or fine-tuned-only mode.
-        num_hops: Number of retrieval hops.
-        top_k:    Documents retrieved per hop.
-
-    Returns:
-        history:  Updated conversation history.
-        sources:  Formatted source citations string.
-        timing:   Inference time string.
-    """
+def respond(message: str, history: list, mode: str, num_hops: int, top_k: int):
+    """Answer one message; return updated history, sources markdown and timing."""
     if not message.strip():
         return history, "", "—"
 
-    start = time.time()
+    result = pipeline.answer(message, mode=mode, k=int(top_k), hops=int(num_hops), short=True)
+    cited = [result.passages[i - 1] for i in parse_sources(result.raw_output) if 0 < i <= len(result.passages)]
 
-    if use_rag:
-        answer, contexts, subquestions, trace = pipeline.query(
-            message, hops=num_hops, k=top_k
-        )
-        # Format sources
-        source_lines = [f"**Sub-questions decomposed:**"]
-        for i, sq in enumerate(subquestions, 1):
-            source_lines.append(f"  {i}. {sq}")
-        source_lines.append("\n**Retrieved contexts (snippets):**")
-        for i, ctx in enumerate(contexts[:3], 1):
-            source_lines.append(f"\n*Source {i}:* {ctx[:300]}...")
-        sources_text = "\n".join(source_lines)
+    if is_abstention(result.answer):
+        reply = "I couldn't find enough evidence in the corpus to answer that."
     else:
-        # Fine-tuned model only (no retrieval)
-        prompt = f"### Instruction:\n{message}\n\n### Response:"
-        tokenizer = pipeline.tokenizer
-        model = pipeline.model
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
-        with torch.no_grad():
-            output = model.generate(
-                **inputs,
-                max_new_tokens=config.max_new_tokens,
-                temperature=config.temperature,
-                top_p=config.top_p,
-                eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.pad_token_id,
-            )
-        full = tokenizer.decode(output[0], skip_special_tokens=True)
-        answer = full[len(prompt):].strip()
-        sources_text = "_Fine-tuned model only — no retrieval used._"
+        reply = f"**{result.answer}**"
+        if cited:
+            reply += "\n\nSources: " + ", ".join(p.get("title", "?") for p in cited)
 
-    elapsed = time.time() - start
-    timing = f"⏱ {elapsed:.2f}s"
+    lines = []
+    if result.queries:
+        lines.append("**Searches run:**")
+        lines += [f"{i}. {q}" for i, q in enumerate(result.queries, 1)]
+    if result.passages:
+        lines.append("\n**Passages given to the model** (cited ones marked ✓):")
+        cited_ids = {id(p) for p in cited}
+        lines += [f"\n{'✓ ' if id(p) in cited_ids else ''}*[{i}] {p.get('title', '')}*: {p['text'][:300]}..."
+                  for i, p in enumerate(result.passages, 1)]
+    sources = "\n".join(lines) or "_Closed-book answer: no retrieval used._"
 
-    history.append((message, answer))
-    return history, sources_text, timing
+    t = result.timings
+    timing = (f"{result.latency_s:.2f}s total · retrieval {t['retrieval_s']:.2f}s · "
+              f"LLM {t['llm_s']:.2f}s over {t['llm_calls']} call(s)")
+    history = history + [{"role": "user", "content": message}, {"role": "assistant", "content": reply}]
+    return history, sources, timing
 
 
 # ─── Gradio UI ────────────────────────────────────────────────────────────────
 
-with gr.Blocks(
-    title="QLoRA + Multi-Hop RAG",
-    theme=gr.themes.Soft(primary_hue="blue", neutral_hue="slate"),
-) as demo:
-
+with gr.Blocks(title="Multi-Hop RAG") as demo:
     gr.Markdown(
-        """
-        # 🔬 QLoRA Fine-Tuning + Multi-Hop RAG
-        *DeepSeek-R1-Distill-Qwen-1.5B · FAISS · arXiv Knowledge Base*
+        f"""
+        # Multi-Hop RAG
+        *LLM: `{pipeline.llm.name}` · retriever: `{config.retriever}` · index: `{config.index_dir}`*
 
-        Ask questions grounded in 5,000 arXiv paper abstracts.
-        Toggle **RAG mode** off to query the fine-tuned model directly.
+        Ask questions that need two facts from two Wikipedia paragraphs. The corpus is the
+        ~5,000 paragraphs behind the 500 HotpotQA benchmark questions, so ask about those topics.
         """
     )
 
     with gr.Row():
         with gr.Column(scale=3):
-            chatbot = gr.Chatbot(label="Conversation", height=480, bubble_full_width=False)
-            msg_box = gr.Textbox(
-                placeholder="Ask something about NLP, LLMs, RAG, transformers...",
-                label="Your message",
-                lines=2,
-            )
+            chatbot = gr.Chatbot(label="Conversation", height=480)
+            msg_box = gr.Textbox(placeholder="Ask a multi-hop question and press Enter...",
+                                 label="Your message", lines=1)
             with gr.Row():
                 submit_btn = gr.Button("Send", variant="primary")
-                clear_btn  = gr.Button("Clear")
+                clear_btn = gr.Button("Clear")
+            gr.Examples(EXAMPLES, inputs=msg_box)
 
         with gr.Column(scale=2):
-            with gr.Accordion("⚙️ Settings", open=True):
-                use_rag   = gr.Checkbox(value=True,  label="Use Multi-Hop RAG")
-                num_hops  = gr.Slider(1, 3, value=2, step=1, label="Retrieval Hops")
-                top_k     = gr.Slider(3, 12, value=8, step=1, label="Top-K Documents per Hop")
+            with gr.Accordion("Settings", open=True):
+                mode = gr.Radio(["closed", "single", "iterative", "decompose"], value="iterative", label="Mode")
+                num_hops = gr.Slider(1, 4, value=config.num_hops, step=1, label="Hops / sub-questions")
+                top_k = gr.Slider(1, 12, value=config.top_k, step=1, label="Passages given to the reader")
 
-            timing_box = gr.Textbox(label="⏱ Inference Time", interactive=False)
-            sources_box = gr.Markdown(label="📚 Sources & Reasoning Trace", value="*Sources will appear here...*")
-
-    gr.Examples(
-        examples=[
-            ["What is the significance of attention mechanisms in transformers?", True, 2, 8],
-            ["How does QLoRA reduce memory usage during fine-tuning?",           True, 2, 8],
-            ["Explain the difference between dense and sparse retrieval.",       True, 2, 8],
-            ["Tell me a fun fact about penguins.",                               False, 2, 8],
-        ],
-        inputs=[msg_box, use_rag, num_hops, top_k],
-        label="Example queries",
-    )
+            timing_box = gr.Textbox(label="Timing", interactive=False)
+            sources_box = gr.Markdown(value="*Searches and passages will appear here...*")
 
     # ── Event Wiring ──────────────────────────────────────────────────────────
 
-    state = gr.State([])  # conversation history
+    def submit(message, history, mode, num_hops, top_k):
+        history, sources, timing = respond(message, history or [], mode, num_hops, top_k)
+        return history, "", sources, timing
 
-    def submit(message, history, use_rag, num_hops, top_k):
-        history, sources, timing = respond(message, history, use_rag, num_hops, top_k)
-        return history, history, "", sources, timing
-
-    submit_btn.click(
-        submit,
-        inputs=[msg_box, state, use_rag, num_hops, top_k],
-        outputs=[chatbot, state, msg_box, sources_box, timing_box],
-    )
-    msg_box.submit(
-        submit,
-        inputs=[msg_box, state, use_rag, num_hops, top_k],
-        outputs=[chatbot, state, msg_box, sources_box, timing_box],
-    )
-    clear_btn.click(
-        lambda: ([], [], "", "*Sources will appear here...*", "—"),
-        outputs=[chatbot, state, msg_box, sources_box, timing_box],
-    )
+    inputs = [msg_box, chatbot, mode, num_hops, top_k]
+    outputs = [chatbot, msg_box, sources_box, timing_box]
+    submit_btn.click(submit, inputs=inputs, outputs=outputs)
+    msg_box.submit(submit, inputs=inputs, outputs=outputs)
+    clear_btn.click(lambda: ([], "", "*Searches and passages will appear here...*", "—"), outputs=outputs)
 
 
 if __name__ == "__main__":
-    demo.launch(share=False, server_name="0.0.0.0", server_port=7860)
+    demo.launch(server_name=os.environ.get("QMR_APP_HOST", "127.0.0.1"), server_port=7860,
+                theme=gr.themes.Soft(primary_hue="blue", neutral_hue="slate"))
