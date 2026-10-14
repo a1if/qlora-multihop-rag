@@ -77,3 +77,39 @@ def test_render_prompt_leaves_models_without_think_token_alone():
 
     prompt = render_prompt(TemplateTokenizer(has_think_token=False), "Q?", "chat", reasoning=False)
     assert prompt == "<user>Q?<model>\n"
+
+
+def test_oom_splits_batch_and_retries():
+    torch = pytest.importorskip("torch")
+    from src.llm import HFLLM
+
+    llm = HFLLM.__new__(HFLLM)                    # skip model loading
+    llm.oom_splits = 0
+    seen = []
+
+    def generate_padded(payloads):
+        seen.append(len(payloads))   # every attempt, including the ones that fail
+        if len(payloads) > 2:
+            raise torch.OutOfMemoryError("CUDA out of memory")
+        return [p[0].upper() for p in payloads]
+
+    llm._generate_padded = generate_padded
+    out = llm._generate_batch([(c, 8, ()) for c in "abcdefg"])
+    assert out == list("ABCDEFG")                 # every caller still gets its own answer, in order
+    assert seen[0] == 7 and llm.oom_splits >= 2
+    assert sum(n for n in seen if n <= 2) == 7         # all 7 requests answered by batches that fit
+
+
+def test_oom_on_single_request_is_raised():
+    torch = pytest.importorskip("torch")
+    from src.llm import HFLLM
+
+    llm = HFLLM.__new__(HFLLM)
+    llm.oom_splits = 0
+
+    def always_oom(payloads):
+        raise torch.OutOfMemoryError("CUDA out of memory")
+
+    llm._generate_padded = always_oom
+    with pytest.raises(torch.OutOfMemoryError):
+        llm._generate_batch([("a", 8, ())])

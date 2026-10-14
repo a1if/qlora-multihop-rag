@@ -268,6 +268,7 @@ def main(argv=None):
             await evaluate_agent(agent, args)
 
     anyio.run(go)
+    print(f"OOM batch splits: {getattr(llm, 'oom_splits', 0)}")
     llm.close()
 
 
@@ -292,7 +293,12 @@ async def evaluate_agent(agent, args):
     with open(path, "a", encoding="utf-8") as f:
         async def one(ex):
             async with limiter:
-                r = await run_agent(agent, ex.question, args.max_steps)
+                try:
+                    r = await run_agent(agent, ex.question, args.max_steps)
+                except Exception as exc:          # one failed question must not abort the run
+                    r = {"answer": "", "raw": "", "tool_calls": [], "queries": [], "retrieved_titles": [],
+                         "llm_calls": 0, "stopped_at_limit": False, "latency_s": 0.0,
+                         "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
             f.write(json.dumps({"id": ex.id, "question": ex.question, "gold": ex.answer, "pred": r["answer"],
                                 "type": ex.type, "level": ex.level, "gold_titles": ex.gold_titles,
                                 **{k: v for k, v in r.items() if k != "answer"}}, ensure_ascii=False) + "\n")

@@ -106,6 +106,7 @@ class HFLLM:
         # generation_config may list several stop tokens (Qwen3: <|im_end|> and <|endoftext|>)
         self.eos_ids = self.model.generation_config.eos_token_id or self.tokenizer.eos_token_id
 
+        self.oom_splits = 0              # batches halved after CUDA out-of-memory
         self._batcher = None
         if max_batch_size > 1:
             from src.batching import DynamicBatcher
@@ -135,6 +136,23 @@ class HFLLM:
         return self._batcher.submit(payload, group=sampling)
 
     def _generate_batch(self, payloads: list[tuple]) -> list[str]:
+        """Generate for a batch; on CUDA OOM, split it in half and retry (down to single requests)."""
+        import torch
+
+        try:
+            return self._generate_padded(payloads)
+        except torch.OutOfMemoryError:
+            if len(payloads) == 1:
+                raise
+        # Retry outside the except block: the live exception's traceback still references the
+        # failed attempt's tensors, so freeing memory inside it doesn't release them.
+        gc.collect()
+        torch.cuda.empty_cache()
+        self.oom_splits += 1
+        mid = len(payloads) // 2
+        return self._generate_batch(payloads[:mid]) + self._generate_batch(payloads[mid:])
+
+    def _generate_padded(self, payloads: list[tuple]) -> list[str]:
         import torch
 
         prompts = [p[0] for p in payloads]
