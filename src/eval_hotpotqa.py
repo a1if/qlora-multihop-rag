@@ -77,6 +77,8 @@ def parse_args(argv=None):
     p.add_argument("--prompt-style", choices=["chat", "alpaca"], default=rag.prompt_style)
     p.add_argument("--reasoning", action="store_true", help="allow <think> reasoning (much slower)")
     p.add_argument("--load-in-4bit", action="store_true", help="hf backend only")
+    p.add_argument("--limit", type=int, default=0,
+                   help="answer only the first N of the --n questions (same corpus/index as the full --n run)")
     p.add_argument("--summarize-only", action="store_true")
     args = p.parse_args(argv)
 
@@ -107,6 +109,7 @@ def preds_path(args, system: str) -> str:
         tag += "_emb-" + os.path.basename(os.path.normpath(args.embedding_model))
     tag += "_think" if args.reasoning else ""
     tag += "_4bit" if args.load_in_4bit else ""
+    tag += f"_first{args.limit}" if getattr(args, "limit", 0) else ""
     return os.path.join(args.out, "preds", tag, system.replace(":", "__") + ".jsonl")
 
 
@@ -165,19 +168,35 @@ def load_segments(path: str) -> list[dict]:
         return json.load(f).get("segments", [])
 
 
+def _cuda():
+    """torch.cuda if a GPU is in use, else None (the light test environment has no torch)."""
+    try:
+        import torch
+    except ImportError:
+        return None
+    return torch.cuda if torch.cuda.is_available() else None
+
+
 def run_system(pipeline, system, examples, path, workers):
     from tqdm import tqdm
 
     mode = split_system(system)[1]
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    cuda = _cuda()
+    if cuda:
+        cuda.reset_peak_memory_stats()
     start = time.perf_counter()
     with open(path, "a", encoding="utf-8") as f, ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(pipeline.answer, ex.question, mode): ex for ex in examples}
         for future in tqdm(as_completed(futures), total=len(futures), desc=system):
             f.write(json.dumps(prediction_record(futures[future], future.result()), ensure_ascii=False) + "\n")
             f.flush()
-    segments = load_segments(path) + [
-        {"questions": len(examples), "wall_s": time.perf_counter() - start, "workers": workers}]
+    segment = {"questions": len(examples), "wall_s": time.perf_counter() - start, "workers": workers,
+               "device": "cuda" if cuda else "cpu"}
+    if cuda:
+        # whole process: LLM + embedder + reranker + KV cache at this concurrency
+        segment["peak_vram_gb"] = round(cuda.max_memory_allocated() / 1024 ** 3, 2)
+    segments = load_segments(path) + [segment]
     with open(meta_path(path), "w") as f:
         json.dump({"segments": segments}, f, indent=2)
 
@@ -248,6 +267,9 @@ def summarize(args, examples) -> list[dict]:
         wall = sum(seg["wall_s"] for seg in segments)
         row["throughput_qps"] = sum(seg["questions"] for seg in segments) / wall if wall else float("nan")
         row["workers"] = max((seg["workers"] for seg in segments), default=None)
+        vram = [seg["peak_vram_gb"] for seg in segments if "peak_vram_gb" in seg]
+        row["peak_vram_gb"] = max(vram) if vram else float("nan")
+        row["device"] = segments[-1].get("device", "cuda") if segments else None
         rows.append(row)
 
     ref = scores.get(args.reference)
@@ -280,19 +302,21 @@ def write_summary(args, rows, n):
         f"embedder={args.embedding_model}",
         "",
         f"| System | EM | F1 (95% CI) | EM bridge | EM comp. | Support R@{args.top_k} | All-support@{args.top_k} "
-        f"| ΔF1 vs {args.reference} (95% CI) | Throughput (q/s) | p50 / p95 latency under load (s) | LLM calls | LLM share |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        f"| ΔF1 vs {args.reference} (95% CI) | Throughput (q/s) | p50 / p95 latency under load (s) | Peak VRAM (GB) | LLM calls | LLM share |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         delta = (f"{100 * r['dF1_vs_ref']:+.1f} [{100 * r['dF1_lo']:+.1f}, {100 * r['dF1_hi']:+.1f}]"
                  if "dF1_vs_ref" in r else "–")
         qps = f"{r['throughput_qps']:.2f}" if r["throughput_qps"] == r["throughput_qps"] else "–"
+        vram = ("CPU only" if r.get("device") == "cpu"
+                else f"{r['peak_vram_gb']:.2f}" if r["peak_vram_gb"] == r["peak_vram_gb"] else "–")
         total = r["llm_s"] + r["retrieval_s"]
         llm_share = f"{100 * r['llm_s'] / total:.0f}%" if total else "–"
         lines.append(
             f"| `{r['system']}` | {_pct(r, 'EM')} | {_pct(r, 'F1')} [{_pct(r, 'F1_lo')}, {_pct(r, 'F1_hi')}] "
             f"| {_pct(r, 'EM_bridge')} | {_pct(r, 'EM_comparison')} | {_pct(r, 'SupportRecall@k')} "
-            f"| {_pct(r, 'AllSupport@k')} | {delta} | {qps} | {r['latency_p50_s']:.2f} / {r['latency_p95_s']:.2f} "
+            f"| {_pct(r, 'AllSupport@k')} | {delta} | {qps} | {r['latency_p50_s']:.2f} / {r['latency_p95_s']:.2f} | {vram} "
             f"| {r['llm_calls']:.1f} | {llm_share} |"
         )
     table = "\n".join(lines)
@@ -320,6 +344,8 @@ def main(argv=None, examples=None, docs=None):
     if examples is None:
         from src.hotpotqa import load_hotpotqa
         examples, docs = load_hotpotqa(args.n, seed=args.seed)
+    if args.limit:
+        examples = examples[:args.limit]
     print(f"{len(examples)} questions · {len(docs)} pooled paragraphs")
 
     if not args.summarize_only:
