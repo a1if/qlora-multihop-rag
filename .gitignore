@@ -61,3 +61,6 @@ indexes/
 
 # ─── Generated training data ──────────────────────────────────────────────────
 data/
+
+# Result tables are proof for the README; keep them (the raw runs in results/ stay ignored)
+!docs/results/
