@@ -13,7 +13,7 @@ Legend: `[x]` done · `[ ]` todo · `[~]` written but not checked against real m
 Done this session: sft_full benchmark (no gain over sft_10k → sft_10k is final), Qwen3-8B reference (fine-tuned 1.7B matches it at ~8× throughput, +2.0 F1 n.s.), recorded eval outputs + CI gates, Gemma 4 E4B attempt (failed on RAM / page file: C: is 98% full; needs freed RAM and fewer concurrent questions), agent benchmark + tool-use fine-tune (+19.7 F1). README has all results.
 
 Next ideas:
-1. Agent over-abstains (17%): fewer abstain traces (10% → 5%) or require 2 searches before abstaining; retrain (~1 h)
+1. ~~Agent over-abstains~~ tried 3% abstain traces (`agent_sft_v2`): looped on every question (0 EM); with guardrails + prefilled forced answer 38 EM / 47.6 F1 vs v1 55 / 64.1. v1 stays final. Next idea if revisited: keep 10% abstain traces but add traces where a third search fails and the model answers from earlier passages
 2. Retry Gemma 4 E4B reference with WSL/other apps closed and `--workers 4` (`D:\qmr\models\gemma-4-E4B-it` is resharded)
 3. Final resume bullets; merge PR
 

@@ -217,6 +217,7 @@ A LangGraph ReAct agent drives the MCP tools itself (it decides what and how oft
 - Fine-tuning on HotpotQA tool-use traces (search the question → search the bridge entity → answer, plus early-stop and abstain variants, rendered byte-identically to the live agent) fixed it: **+19.7 F1** (95% CI [+8.3, +30.8]), two searches on 97/100 questions, and the highest evidence recall of any setup.
 - It is statistically level with the fixed pipeline (−4.9 F1, CI [−14.0, +4.2]); it over-abstains (17% vs 5%).
 - The pipeline-tuned model stopped calling tools entirely: narrow fine-tuning overrides general behaviour, so tool use needed its own training data.
+- **Ablation, fewer abstain traces (10% → 3%):** the agent stopped refusing but never stopped searching. It searched its own answer entity in a loop until the step limit on all 100 questions (0 EM) and ignored in-context guardrail messages. Tool-layer guardrails (repeated-search block, search budget) plus a forced final answer with the reply prefilled as `Answer:` recovered it to 38 EM / 47.6 F1, still well below the 10% version (−16.5 F1, CI [−25.9, −6.9]). The abstain traces were also the model's only learned way to stop, so the 10% model stays the final agent; the guardrails stay as a safety net.
 
 ### Training and inference efficiency (RTX 5070, 12 GB)
 
