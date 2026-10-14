@@ -133,6 +133,9 @@ def main(argv=None):
     p.add_argument("--val-n", type=int, default=100)
     p.add_argument("--tokenizer", default="Qwen/Qwen3-1.7B")
     p.add_argument("--seed", type=int, default=1, help="differs from data_sft's seed, so different questions")
+    p.add_argument("--early-stop-ratio", type=float, default=0.15)
+    p.add_argument("--abstain-ratio", type=float, default=0.03,
+                   help="0.10 made the agent refuse 15/100 questions despite having both gold passages")
     p.add_argument("--out", default="data/agent")
     args = p.parse_args(argv)
 
@@ -146,8 +149,9 @@ def main(argv=None):
     model = LocalToolChatModel(llm=TokenizerOnly()).bind_tools(anyio.run(agent_tool_schemas))
     rows = load_dataset("hotpotqa/hotpot_qa", "distractor", split="train").shuffle(seed=args.seed)
     rows = rows.select(range(args.n + args.val_n))
-    splits = {"train": build_examples(rows.select(range(args.val_n, args.n + args.val_n)), model, seed=args.seed),
-              "val": build_examples(rows.select(range(args.val_n)), model, seed=args.seed + 1)}
+    ratios = dict(early_stop_ratio=args.early_stop_ratio, abstain_ratio=args.abstain_ratio)
+    splits = {"train": build_examples(rows.select(range(args.val_n, args.n + args.val_n)), model, seed=args.seed, **ratios),
+              "val": build_examples(rows.select(range(args.val_n)), model, seed=args.seed + 1, **ratios)}
 
     os.makedirs(args.out, exist_ok=True)
     summary = {"args": vars(args)}
